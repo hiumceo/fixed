@@ -1,0 +1,380 @@
+"use client";
+
+import Link from "next/link";
+import { createPortal } from "react-dom";
+import { ChangeEvent, useEffect, useMemo, useState } from "react";
+import { canShowFeature, hasTierPermission, normalizeAccountState, TIER_LABELS, ACCOUNT_TIER_LABELS, type AccountState, type FeatureKey, type Tier } from "@/lib/account";
+import WorkspaceNavigator from "@/components_WorkspaceNavigator";
+import AuthGate from "@/components_AuthGate";
+import DeleteConfirmModal from "@/components_DeleteConfirmModal";
+
+const LAYERS = [
+  { id: "account", label: "ACCOUNT SETTINGS" },
+  { id: "preferences", label: "PREFERENCES" },
+] as const;
+
+const FEATURES: { key: FeatureKey; label: string; description: string }[] = [
+  { key: "browser", label: "INVESTIGATION BROWSER", description: "Browser session for investigative activities." },
+  { key: "checker", label: "ULTIMATE CHECKER", description: "Website defect checker workspace" },
+  { key: "signals", label: "WORKSPACE SIGNALS", description: "Captured defect-check signals." },
+  { key: "evidence", label: "WORKSPACE EVIDENCES", description: "Screenshot, screencast and log evidence." },
+  { key: "extractors", label: "WORKSPACE EXTRACTORS", description: "Platform-Based extraction tools." },
+  { key: "sources", label: "WORKSPACE SOURCES", description: "Source hierarchy and project instruction." },
+];
+
+function AccountPageContent() {
+  const [account, setAccount] = useState<AccountState>(() => normalizeAccountState(null));
+  const [layer, setLayer] = useState<(typeof LAYERS)[number]["id"]>("account");
+  const [status, setStatus] = useState("READY");
+  const [accountDirty, setAccountDirty] = useState(false);
+  const [accountSaving, setAccountSaving] = useState(false);
+  const [workspaces, setWorkspaces] = useState<{ id: string; name: string; createdAt: string; updatedAt: string }[]>([]);
+  const [leavePrompt, setLeavePrompt] = useState<{ href: string; workspaceId?: string } | null>(null);
+  const [signOutPrompt, setSignOutPrompt] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [deleteWorkspaceId, setDeleteWorkspaceId] = useState<string | null>(null);
+  const [tierInfo, setTierInfo] = useState<Tier | null>(null);
+  const [authUser, setAuthUser] = useState<{ id: string; username: string; telegramId?: string; telegramUsername?: string } | null>(null);
+  const [username, setUsername] = useState("");
+  const [usernameDirty, setUsernameDirty] = useState(false);
+  const [passwordCurrent, setPasswordCurrent] = useState("");
+  const [passwordNew, setPasswordNew] = useState("");
+  const [passwordConfirm, setPasswordConfirm] = useState("");
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    if (!accountDirty && !usernameDirty) return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [accountDirty, usernameDirty]);
+
+  useEffect(() => {
+    fetch("/api/workstation/workspaces", { cache: "no-store" })
+      .then(async r => r.ok ? r.json() : null)
+      .then(data => { if (Array.isArray(data?.workspaces)) setWorkspaces(data.workspaces); })
+      .catch(() => {});
+  }, []);
+
+  async function deleteWorkspace(id: string) {
+    try {
+      const response = await fetch(`/api/workstation/workspaces/${encodeURIComponent(id)}`, { method: "DELETE" });
+      if (!response.ok) throw new Error();
+      setWorkspaces(previous => previous.filter(workspace => workspace.id !== id));
+      setDeleteWorkspaceId(null);
+      setStatus("WORKSPACE DELETED");
+    } catch {
+      setDeleteWorkspaceId(null);
+      setStatus("WORKSPACE DELETE FAILED");
+    }
+  }
+
+  useEffect(() => {
+    fetch("/api/account", { cache: "no-store" }).then(async r => r.ok ? r.json() : null).then(data => {
+      if (data?.authUser) {
+        setAuthUser(data.authUser);
+        setUsername(String(data.authUser.username || ""));
+      }
+      if (data?.account) {
+        setAccount(normalizeAccountState(data.account));
+        setAccountDirty(false);
+      }
+    }).catch(() => setStatus("ACCOUNT UNAVAILABLE"));
+    fetch("/api/auth", { cache: "no-store" }).then(async r => r.ok ? r.json() : null).then(data => {
+      if (data?.user) {
+        setAuthUser(data.user);
+        setUsername(String(data.user.username || ""));
+      }
+    }).catch(() => {});
+  }, []);
+
+  async function save(next: AccountState, message = "ACCOUNT SAVED") {
+    if (accountSaving) return false;
+    setAccountSaving(true);
+    try {
+      const response = await fetch("/api/account", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ account: next }), cache: "no-store" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.account) throw new Error();
+      const saved = normalizeAccountState(data.account);
+      setAccount(saved);
+      setAccountDirty(false);
+      const usernameOk = await saveUsername();
+      if (!usernameOk) return false;
+      setStatus(message);
+      return true;
+    } catch { setStatus("ACCOUNT SAVE FAILED"); return false; }
+    finally { setAccountSaving(false); }
+  }
+
+  function navigateAway(href: string, workspaceId?: string) {
+    if (accountDirty || usernameDirty) { setLeavePrompt({ href, workspaceId }); return; }
+    if (workspaceId) window.localStorage.setItem("v1124-workstation-active", workspaceId);
+    window.location.href = href;
+  }
+
+  async function leaveWithSave() {
+    if (!leavePrompt) return;
+    const { href, workspaceId } = leavePrompt;
+    const ok = await save(account);
+    if (ok) { if (workspaceId) window.localStorage.setItem("v1124-workstation-active", workspaceId); setLeavePrompt(null); window.location.href = href; }
+  }
+
+  function leaveWithoutSave() { setLeavePrompt(null); }
+
+  async function signOut() {
+    if (signingOut) return;
+    if (accountDirty || usernameDirty) { setSignOutPrompt(true); return; }
+    setSigningOut(true);
+    try {
+      const response = await fetch("/api/auth", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "signout" }), cache: "no-store" });
+      if (!response.ok) throw new Error();
+      window.location.href = "/";
+    } catch { setSigningOut(false); setStatus("SIGN OUT FAILED"); }
+  }
+
+  async function saveAndSignOut() {
+    if (signingOut) return;
+    setSigningOut(true);
+    const ok = await save(account, "ACCOUNT SAVED");
+    if (!ok) { setSigningOut(false); return; }
+    try {
+      const response = await fetch("/api/auth", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "signout" }), cache: "no-store" });
+      if (!response.ok) throw new Error();
+      window.location.href = "/";
+    } catch { setSigningOut(false); setSignOutPrompt(false); setStatus("SIGN OUT FAILED"); }
+  }
+
+  function updateProfileAvatar(value: string) {
+    setAccount(prev => ({ ...prev, profile: { ...prev.profile, avatar: value } }));
+    setAccountDirty(true);
+  }
+
+  async function saveUsername() {
+    if (!usernameDirty || !authUser || !username.trim()) return true;
+    try {
+      const response = await fetch("/api/auth", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ action: "update-username", username: username.trim() }),
+        cache: "no-store",
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.user) throw new Error(data?.error || "USERNAME COULD NOT BE SAVED.");
+      setAuthUser(data.user);
+      setUsername(String(data.user.username || ""));
+      setUsernameDirty(false);
+      return true;
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "USERNAME COULD NOT BE SAVED.");
+      return false;
+    }
+  }
+
+  async function savePassword() {
+    if (!passwordCurrent || !passwordNew || !passwordConfirm) { setStatus("COMPLETE ALL PASSWORD FIELDS"); return; }
+    if (passwordNew !== passwordConfirm) { setStatus("NEW PASSWORDS DO NOT MATCH"); return; }
+    setPasswordSaving(true);
+    try {
+      const response = await fetch("/api/auth/password", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ currentPassword: passwordCurrent, newPassword: passwordNew }),
+        cache: "no-store",
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data?.error || "PASSWORD COULD NOT BE CHANGED.");
+      setPasswordCurrent("");
+      setPasswordNew("");
+      setPasswordConfirm("");
+      setStatus("PASSWORD UPDATED");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "PASSWORD COULD NOT BE CHANGED.");
+    } finally {
+      setPasswordSaving(false);
+    }
+  }
+
+  async function uploadAvatar(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setStatus("PROFILE IMAGE REQUIRED"); event.target.value = ""; return; }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const source = typeof reader.result === "string" ? reader.result : "";
+      if (!source) return;
+      const image = new Image();
+      image.onload = () => {
+        const size = 512;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const context = canvas.getContext("2d");
+        if (!context) { setStatus("PROFILE IMAGE COULD NOT BE PREPARED"); return; }
+        const scale = Math.max(size / image.naturalWidth, size / image.naturalHeight);
+        const width = image.naturalWidth * scale;
+        const height = image.naturalHeight * scale;
+        const x = (size - width) / 2;
+        const y = (size - height) / 2;
+        context.drawImage(image, x, y, width, height);
+        const avatar = canvas.toDataURL("image/jpeg", 0.88);
+        setAccount(prev => ({ ...prev, profile: { ...prev.profile, avatar } }));
+        setAccountDirty(true);
+        setStatus("PROFILE IMAGE READY • PRESS SAVE");
+      };
+      image.onerror = () => setStatus("PROFILE IMAGE COULD NOT BE READ");
+      image.src = source;
+    };
+    reader.onerror = () => setStatus("PROFILE IMAGE COULD NOT BE READ");
+    reader.readAsDataURL(file);
+    event.target.value = "";
+  }
+
+  const permissions = useMemo(() => FEATURES.reduce<Record<FeatureKey, boolean>>((out, feature) => {
+    out[feature.key] = hasTierPermission(account.tier, feature.key);
+    return out;
+  }, {} as Record<FeatureKey, boolean>), [account.tier]);
+
+  return (
+    <>
+      {mounted && leavePrompt ? createPortal(
+        <div role="dialog" aria-modal="true" className="fixed inset-0 z-[2147483647] flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-cyan-400/20 bg-[#020608] p-5 text-white shadow-[0_0_40px_rgba(0,220,255,.18)]">
+            <p className="text-body font-black tracking-[0.2em] text-cyan-400">UNSAVED CHANGES</p>
+            <h3 className="mt-2 text-primary font-black">You have unsaved changes.</h3>
+            <p className="mt-2 text-body leading-5 text-cyan-100/50">What would you like to do before leaving?</p>
+            <div className="mt-5 grid grid-cols-2 gap-2">
+              <button type="button" onClick={() => void leaveWithSave()} className="rounded-xl bg-cyan-400 px-3 py-3 text-micro font-black tracking-[0.12em] text-black">SAVE</button>
+              <button type="button" onClick={() => setLeavePrompt(null)} className="rounded-xl border border-white/15 bg-black px-3 py-3 text-micro font-black tracking-[0.12em] text-white">CANCEL</button>
+            </div>
+          </div>
+        </div>, document.body) : null}
+    {mounted && signOutPrompt ? createPortal(
+      <div role="dialog" aria-modal="true" className="fixed inset-0 z-[2147483647] flex items-center justify-center bg-black/70 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-cyan-400/20 bg-[#020608] p-5 text-white shadow-[0_0_40px_rgba(0,220,255,.18)]">
+          <p className="text-body font-black tracking-[0.2em] text-cyan-400">UNSAVED CHANGES</p>
+          <h3 className="mt-2 text-primary font-black">SAVE BEFORE SIGNING OUT?</h3>
+          <p className="mt-2 text-body leading-5 text-cyan-100/50">You have unsaved account changes. Save them before signing out so nothing is lost.</p>
+          <div className="mt-5 grid grid-cols-2 gap-2">
+            <button type="button" onClick={() => void saveAndSignOut()} disabled={signingOut || accountSaving} className="rounded-xl border border-cyan-400/30 bg-cyan-400 px-3 py-3 text-micro font-black tracking-[0.12em] text-black disabled:opacity-50">{signingOut ? "SAVING..." : "SAVE"}</button>
+            <button type="button" onClick={() => setSignOutPrompt(false)} disabled={signingOut} className="rounded-xl border border-white/15 bg-black px-3 py-3 text-micro font-black tracking-[0.12em] text-white disabled:opacity-50">CANCEL</button>
+          </div>
+        </div>
+      </div>, document.body) : null}
+    {mounted && tierInfo ? createPortal(
+      <div role="dialog" aria-modal="true" className="fixed inset-0 z-[2147483647] flex items-center justify-center bg-black/70 p-4">
+        <div className="w-full max-w-md rounded-2xl border border-cyan-400/20 bg-[#020608] p-5 text-white shadow-[0_0_40px_rgba(0,220,255,.18)]">
+          <p className="text-body font-black tracking-[0.2em] text-cyan-400">ACCOUNT TIER</p>
+          <h3 className="mt-2 text-primary font-black" style={{ fontSize: "calc(var(--font-size-primary) + 2px)" }}>{ACCOUNT_TIER_LABELS[tierInfo].toUpperCase()}</h3>
+          <p className="mt-2 text-body leading-5 text-cyan-100/50">Tier access is assigned by the system/admin. This option is shown so you can see what the tier offers and how progression works; it does not change your account tier.</p>
+          <div className="mt-5 rounded-xl border border-cyan-400/15 bg-black/40 p-4">
+            <p className="text-body font-black tracking-[0.16em] text-cyan-400">STAR LEVEL</p>
+            <p className="mt-2 text-primary font-black" style={{ fontSize: "calc(var(--font-size-primary) + 2px)" }}>{tierInfo === "NOVICE" ? "LEVEL 1–2" : tierInfo === "AMATEUR" ? "LEVEL 3" : "LEVEL 4–5"}</p>
+            <p className="mt-3 text-body leading-5 text-cyan-100/45">{tierInfo === "NOVICE" ? "Foundation access for learning the WorkStation workflow and building verified testing progress." : tierInfo === "AMATEUR" ? "The advancement tier for learning the broader WorkStation workflow before moving into Pro." : "The highest progression tier with the broadest WorkStation access."}</p>
+          </div>
+          <div className="mt-4 rounded-xl border border-cyan-400/15 bg-black/40 p-4">
+            <p className="text-body font-black tracking-[0.16em] text-cyan-400">HOW TO ADVANCE</p>
+            <p className="mt-2 text-body leading-5 text-cyan-100/45">Progress through verified testing activity and platform performance. The tier is assigned when the required level is reached or granted by the administrator.</p>
+          </div>
+          <button type="button" onClick={() => setTierInfo(null)} className="mt-5 w-full rounded-xl border border-white/15 bg-black px-3 py-3 text-micro font-black tracking-[0.12em] text-white" style={{ fontSize: "calc(var(--font-size-micro) * 2)" }}>CLOSE</button>
+        </div>
+      </div>, document.body) : null}
+    <DeleteConfirmModal
+      open={deleteWorkspaceId !== null}
+      label="WORKSPACE MANAGEMENT"
+      message="Delete this workspace? This cannot be undone."
+      onCancel={() => setDeleteWorkspaceId(null)}
+      onConfirm={() => { if (deleteWorkspaceId) void deleteWorkspace(deleteWorkspaceId); }}
+    />
+    <main className="min-h-screen overflow-hidden bg-[#020608] text-white">
+      <div className="pointer-events-none fixed inset-0 opacity-30"><div className="absolute inset-0" style={{ backgroundImage: "linear-gradient(rgba(0,220,255,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(0,220,255,0.06) 1px, transparent 1px)", backgroundSize: "42px 42px" }} /></div>
+      <div className="pointer-events-none fixed left-0 top-0 h-full w-24 border-r border-cyan-400/15" /><div className="pointer-events-none fixed right-0 top-0 h-full w-24 border-l border-cyan-400/15" />
+      <div className="relative mx-auto min-h-screen max-w-6xl px-5 py-8 sm:px-10 sm:py-10">
+        <div className="relative">
+          <div className="absolute right-5 top-5 z-20 sm:right-10 sm:top-8">
+          </div>
+          <header className="mx-auto max-w-4xl text-center">
+            <img src="/bug-workstation-logo.png" alt="v1124 Bug WorkStation" className="mx-auto h-auto w-full max-w-[12rem] object-contain" />
+            <p className="mt-5 text-xs font-semibold tracking-[0.14em] text-cyan-100/65 sm:text-sm">A SPECIALIZED WORKSPACE FOR AUTOMATED WEBSITE INVESTIGATION</p>
+            <p className="mt-4 text-label font-black tracking-[0.16em] text-cyan-400 sm:text-body">INVESTIGATION BROWSER &nbsp;|&nbsp; <span className="text-green-400">ULTIMATE CHECKER</span> &nbsp;|&nbsp; SIGNALS &nbsp;|&nbsp; EVIDENCES &nbsp;|&nbsp; EXTRACTORS &nbsp;|&nbsp; SOURCE HIERARCHY &nbsp;|&nbsp; PROJECT INSTRUCTION</p>
+          </header>
+        </div>
+
+        <WorkspaceNavigator
+          workspaces={workspaces}
+          activePath="settings"
+          compact
+          onSave={accountSaving ? undefined : () => save(account).then(() => undefined)}
+          saveAvailable={accountDirty && !accountSaving}
+          onNew={() => navigateAway("/workstation")}
+          onLoadWorkspace={(id) => { navigateAway("/workstation", id); }}
+          onIncognito={() => navigateAway("/workstation")}
+          onDeleteWorkspace={(id) => setDeleteWorkspaceId(id)}
+        />
+
+        <section className="mx-auto mt-6 max-w-5xl rounded-[28px] border border-cyan-400/30 bg-black/70 p-5 shadow-[0_0_40px_rgba(0,220,255,.05)] sm:p-7">
+          <div className="grid grid-cols-2 gap-2">
+            {LAYERS.map((item, index) => <button key={item.id} type="button" onClick={() => setLayer(item.id)} className={`rounded-xl border px-3 py-3 text-primary font-black tracking-[0.1em] transition ${layer === item.id ? "border-white/20 bg-white text-black" : "border-cyan-400/15 bg-cyan-400/[0.03] text-cyan-100/50 hover:text-cyan-100/80"}`}><span className="mr-2">●</span>{item.label}</button>)}
+          </div>
+
+          <div className="mt-6 rounded-2xl border border-cyan-400/20 bg-cyan-400/[0.025] p-5">
+            {layer === "account" && <>
+              <p className="text-primary font-black tracking-[0.22em] text-cyan-400">ACCOUNT SETTINGS</p>
+              <h2 className="mt-2 text-primary font-black">PROFILE</h2>
+              <div className="mt-6 rounded-2xl border border-cyan-400/20 bg-black/40 p-5">
+                <div className="grid gap-5 sm:grid-cols-[120px_1fr] sm:items-start">
+                  <div className="text-center">
+                    <div className="mx-auto h-24 w-24 overflow-hidden rounded-full border border-cyan-400/15 bg-black/50">{<img src={account.profile.avatar || "/favicon.png"} alt="Profile" className="block h-full w-full max-h-full max-w-full object-cover" style={{ width: "100%", height: "100%", maxWidth: "100%", maxHeight: "100%" }} />}</div>
+                    <label className="mt-3 block cursor-pointer rounded-xl border border-cyan-400/15 bg-black/30 px-2 py-2 text-label font-black tracking-[0.1em] text-cyan-300">CHANGE IMAGE<input type="file" accept="image/*" className="hidden" onChange={uploadAvatar} /></label>
+                  </div>
+                  <div className="grid gap-4">
+                    <label className="block"><span className="text-label font-black tracking-[0.14em] text-cyan-400/70">USERNAME</span><input value={username} onChange={e => { setUsername(e.target.value); setUsernameDirty(true); }} className="mt-2 w-full rounded-xl border border-cyan-400/15 bg-black px-3 py-3 text-primary outline-none" /></label>
+                    <label className="block"><span className="text-label font-black tracking-[0.14em] text-cyan-400/70">TELEGRAM ID</span><input value={authUser?.telegramId || ""} readOnly aria-readonly="true" className="mt-2 w-full cursor-not-allowed rounded-xl border border-cyan-400/10 bg-white/[0.03] px-3 py-3 text-primary text-cyan-100/55 outline-none" /></label>
+                    <label className="block"><span className="text-label font-black tracking-[0.14em] text-cyan-400/70">TELEGRAM USERNAME</span><input value={authUser?.telegramUsername ? `@${authUser.telegramUsername.replace(/^@/, "")}` : ""} readOnly aria-readonly="true" className="mt-2 w-full cursor-not-allowed rounded-xl border border-cyan-400/10 bg-white/[0.03] px-3 py-3 text-primary text-cyan-100/55 outline-none" /></label>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-5 rounded-2xl border border-cyan-400/20 bg-black/40 p-5">
+                <p className="text-body font-black tracking-[0.22em] text-cyan-400">PASSWORD SETTINGS</p>
+                <div className="mt-5 grid gap-4">
+                  <label className="block"><span className="text-label font-black tracking-[0.14em] text-cyan-400/70">CURRENT PASSWORD</span><input type="password" value={passwordCurrent} onChange={e => setPasswordCurrent(e.target.value)} autoComplete="current-password" className="mt-2 w-full rounded-xl border border-cyan-400/15 bg-black px-3 py-3 text-primary outline-none" /></label>
+                  <label className="block"><span className="text-label font-black tracking-[0.14em] text-cyan-400/70">NEW PASSWORD</span><input type="password" value={passwordNew} onChange={e => setPasswordNew(e.target.value)} autoComplete="new-password" className="mt-2 w-full rounded-xl border border-cyan-400/15 bg-black px-3 py-3 text-primary outline-none" /></label>
+                  <label className="block"><span className="text-label font-black tracking-[0.14em] text-cyan-400/70">CONFIRM NEW PASSWORD</span><input type="password" value={passwordConfirm} onChange={e => setPasswordConfirm(e.target.value)} autoComplete="new-password" className="mt-2 w-full rounded-xl border border-cyan-400/15 bg-black px-3 py-3 text-primary outline-none" /></label>
+                </div>
+                <button type="button" disabled={passwordSaving} onClick={() => void savePassword()} className="mt-5 rounded-xl border border-cyan-400/30 bg-cyan-400 px-4 py-3 text-micro font-black tracking-[0.12em] text-black disabled:cursor-not-allowed disabled:opacity-50">{passwordSaving ? "UPDATING..." : "UPDATE PASSWORD"}</button>
+              </div>
+            </>}
+
+            {layer === "preferences" && <>
+              <p className="text-body font-black tracking-[0.22em] text-cyan-400">PREFERENCES</p><h2 className="mt-2 text-primary font-black">WORKSPACE FEATURES PREFERENCES</h2>
+              <div className="mt-6 rounded-2xl border border-cyan-400/30 bg-black/70 p-5">
+                <div className="border-b border-cyan-400/20 pb-4"><p className="text-body font-black tracking-[0.18em] text-cyan-400">ACCOUNT TIER</p><p className="mt-2 text-display font-black">{ACCOUNT_TIER_LABELS[account.tier].toUpperCase()}</p></div>
+                <div className="mt-4 flex flex-wrap gap-2">{(["NOVICE","AMATEUR","PRO"] as Tier[]).map(tier => <button key={tier} type="button" disabled={account.tier === tier} onClick={() => setTierInfo(tier)} className={`rounded-xl border px-4 py-3 text-primary font-black tracking-[0.12em] transition ${account.tier === tier ? "cursor-default border-white/15 bg-white text-black" : "border-cyan-400/15 bg-cyan-400/[0.03] text-cyan-300 hover:border-cyan-300/40 hover:bg-cyan-400/10"}`}>{TIER_LABELS[tier].toUpperCase()}</button>)}</div>
+              </div>
+              <div className="mt-5 rounded-2xl border border-cyan-400/30 bg-black/70 p-5">
+                <div className="border-b border-cyan-400/20 pb-4"><p className="text-body font-black tracking-[0.18em] text-cyan-400">WORKSTATION LAYOUT</p><h3 className="mt-2 text-primary font-black">FEATURE VISIBILITY</h3><p className="mt-2 text-body leading-5 text-cyan-100/45">Choose which Workspace features is available in your WorkStation. Features unavailable to your tier remain disabled.</p></div>
+                <div className="mt-4 grid gap-3">{FEATURES.map(feature => { const allowed = permissions[feature.key]; const enabled = canShowFeature(account, feature.key); const warningLabel = feature.key === "browser" ? "Investigation Browser" : feature.key === "signals" ? "Workspace Signals" : feature.key === "extractors" ? "Workspace Extractors" : feature.key === "evidence" ? "Workspace Evidences" : feature.key === "sources" ? "Workspace Sources" : "Ultimate Checker"; return <div key={feature.key} className={`rounded-xl border ${allowed ? "border-cyan-400/15 bg-black/40" : "border-white/6 bg-white/[0.015] opacity-40"}`}><div className="flex items-center justify-between gap-4 p-4"><span><span className="block text-primary font-black tracking-[0.12em] text-cyan-200/80">{feature.label}</span><span className="mt-1 block text-body text-cyan-100/35">{allowed ? feature.description : "NOT INCLUDED IN THIS TIER"}</span></span><button type="button" role="switch" aria-checked={enabled} aria-label={`${feature.label} ${enabled ? "enabled" : "disabled"}`} disabled={!allowed} onClick={() => { if (!allowed) return; setAccount(prev => ({ ...prev, preferences: { ...prev.preferences, [feature.key]: !enabled } })); setAccountDirty(true); }} className="relative shrink-0 cursor-pointer rounded-full transition-all duration-200 disabled:cursor-not-allowed" style={{ width: 58, height: 32, padding: 2, backgroundColor: !allowed ? "rgba(255,255,255,.10)" : enabled ? "#22d3ee" : "#ef4444", border: `2px solid ${!allowed ? "rgba(255,255,255,.18)" : enabled ? "#67e8f9" : "#f87171"}`, boxShadow: !allowed ? "none" : enabled ? "0 0 18px rgba(34,211,238,.35)" : "0 0 18px rgba(239,68,68,.25)" }}><span className="absolute rounded-full bg-black shadow-md transition-transform duration-200" style={{ width: 24, height: 24, top: 2, left: 2, transform: enabled ? "translateX(26px)" : "translateX(0)" }} /></button></div>{allowed && !enabled ? <p className="border-t border-red-400/10 px-4 py-2 text-body font-black tracking-[0.02em] text-red-300">WARNING: Turning this off will disable the {warningLabel}.</p> : null}</div>; })}</div>
+              </div>
+              <div className="mt-5 rounded-2xl border border-cyan-400/30 bg-black/70 p-5">
+                <div className="border-b border-cyan-400/20 pb-4">
+                  <div className="flex items-center justify-between gap-4">
+                    <h3 className="text-primary font-black">SIGN OUT</h3>
+                    <button type="button" onClick={() => void signOut()} disabled={signingOut} className="shrink-0 rounded-xl px-4 py-3 text-body font-black bg-red-400 text-black disabled:cursor-not-allowed disabled:opacity-50">{signingOut ? "SIGNING OUT..." : "SIGN OUT"}</button>
+                  </div>
+                  <p className="mt-2 text-body leading-5 text-cyan-100/45">Signing out of your account? Any unsaved account changes must be saved before you can sign out.</p>
+                </div>
+              </div>
+              
+            </>}
+          </div>
+          <div className="mt-5 text-label font-black tracking-[0.12em] text-cyan-300/60">STATUS: {status}</div>
+        </section>
+        <footer className="mt-10 border-t border-cyan-400/20 pt-6 text-center text-label font-black tracking-[0.2em] text-cyan-400/40">v1124 ACCOUNT</footer>
+      </div>
+    </main>
+    </>
+  );
+}
+
+export default function AccountPage(){ return <AuthGate returnTo="/workstation/settings"><AccountPageContent /></AuthGate>; }

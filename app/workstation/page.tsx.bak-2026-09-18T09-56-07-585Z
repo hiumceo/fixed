@@ -1,0 +1,1206 @@
+"use client";
+
+import { ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import Link from "next/link";
+import DeleteConfirmModal from "@/components_DeleteConfirmModal";
+import AuthGate from "@/components_AuthGate";
+import { canShowFeature, normalizeAccountState, type AccountState, type FeatureKey } from "@/lib/account";
+
+type Extractor = { id: string; name: string; platform: string; description: string };
+type Artifact = { id: string; name: string; kind: "JSON" | "TXT" | "MASTER"; createdAt: string; content?: string };
+type Workspace = { id: string; name: string; createdAt: string; updatedAt: string };
+type WorkspaceState = {
+  browserUrl: string; investigationBrowser: string; selectedExtractor: string;
+  signals: Artifact[]; extractedFiles: Artifact[]; sources: SourceFile[];
+  checkerReports: CheckerReport[];
+  evidenceFiles: EvidenceFile[];
+  inlineReports: Partial<Record<"LINK"|"IMAGE"|"VIDEO",{filename:string;content:string}>>;
+  inlineReportCategory: "LINK"|"IMAGE"|"VIDEO"; ultimateFinalSummary: string[];
+  ultimateSummary: { LINK:{checked:number;manual:number;defects:number}; IMAGE:{checked:number;manual:number;defects:number}; VIDEO:{checked:number;manual:number;defects:number} };
+};
+type SourceFile = { id: string; name: string; kind: "INSTRUCTIONS" | "SOURCE"; createdAt: string; content?: string };
+type EvidenceFile = { id: string; name: string; category: "IMAGE" | "VIDEO" | "LOG"; createdAt: string; type: string; size: number; dataUrl: string };
+type CheckerReport = { id: string; category: "LINK" | "IMAGE" | "VIDEO"; filename?: string; count?: number; content?: string };
+
+const EXTRACTORS: Extractor[] = [
+  ["testio-overview","Test IO Overview Extractor v1124","Test IO","Extract the current cycle overview."],
+  ["testio-new-bugs","Test IO New Bugs Extractor v1124","Test IO","Extract newly reported bugs."],
+  ["testio-known-bugs","Test IO Known Bugs Extractor v1124","Test IO","Extract known bugs for the current cycle."],
+  ["testio-my-bugs","Test IO My Bugs Extractor v1124","Test IO","Extract the tester's reported bugs."],
+  ["testio-my-reproduction","Test IO My Reproduction Extractor v1124","Test IO","Extract reproduction information."],
+  ["testio-chat","Test IO Chat Extractor v1124","Test IO","Extract relevant cycle chat."],
+  ["testio-academy","Test IO Academy Extractor v1124","Test IO","Extract Academy guidance."],
+  ["testio-single-academy","Test IO Single Academy Extractor v1124","Test IO","Extract a single Academy article."],
+  ["utest-overview","uTest Overview Extractor v1124","uTest","Extract the current uTest cycle overview."],
+  ["utest-issues","uTest Issues Extractor v1124","uTest","Extract newly reported issues."],
+  ["utest-testcases","uTest Test Cases Extractor v1124","uTest","Extract current test cases."],
+  ["utest-academy","uTest Academy Extractor v1124","uTest","Extract Academy guidance."],
+].map(([id,name,platform,description]) => ({id,name,platform,description}));
+
+const STORAGE = {
+  workspaces: "v1124-workstation-workspaces",
+  active: "v1124-workstation-active",
+  signals: "v1124-workstation-signals",
+  history: "v1124-workstation-history",
+  extractors: "v1124-workstation-custom-extractors",
+  instructions: "v1124-workstation-project-instructions",
+  sources: "v1124-workstation-source-hierarchy",
+};
+
+function read<T>(key: string, fallback: T): T {
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) as T : fallback; } catch { return fallback; }
+}
+function write(key: string, value: unknown) { localStorage.setItem(key, JSON.stringify(value)); }
+
+function WorkstationPageContent() {
+  const [workspaces,setWorkspaces] = useState<Workspace[]>([]);
+  const [activeWorkspace,setActiveWorkspace] = useState<Workspace|null>(null);
+  const [workspaceName,setWorkspaceName] = useState("");
+  const [browserUrl,setBrowserUrl] = useState("");
+  const [investigationBrowser,setInvestigationBrowser] = useState("chrome");
+  const [browserReady,setBrowserReady] = useState(false);
+  const browserActionRef = useRef(0);
+  const [selectedExtractor,setSelectedExtractor] = useState("");
+  const [signals,setSignals] = useState<Artifact[]>([]);
+  const [extractedFiles,setExtractedFiles] = useState<Artifact[]>([]);
+  const [customExtractors,setCustomExtractors] = useState<Extractor[]>([]);
+  const [instructions,setInstructions] = useState<SourceFile[]>([]);
+  const [sources,setSources] = useState<SourceFile[]>([]);
+  const [status,setStatus] = useState("READY");
+  const [running,setRunning] = useState(false);
+  const [extractorLiveLines,setExtractorLiveLines] = useState<string[]>([]);
+  const [extractorHasRun,setExtractorHasRun] = useState(false);
+  const [extractorFinalSummary,setExtractorFinalSummary] = useState<{discovered:number;successful:number;failed:number;generated:number;extractor:string;source:string;failures:{url:string;error:string}[];failedRun?:boolean;errorMessage?:string}|null>(null);
+  const [mergeRunning,setMergeRunning] = useState(false);
+  const [instructionOpen,setInstructionOpen] = useState(false);
+  const [instructionLoading,setInstructionLoading] = useState(false);
+  const [instructionError,setInstructionError] = useState("");
+  const [ultimateRunning,setUltimateRunning] = useState(false);
+  const [checkerReports,setCheckerReports] = useState<CheckerReport[]>([]);
+  const [evidenceFiles,setEvidenceFiles] = useState<EvidenceFile[]>([]);
+  const [inlineReports,setInlineReports] = useState<Partial<Record<"LINK"|"IMAGE"|"VIDEO",{filename:string;content:string}>>>({});
+  const [inlineReportCategory,setInlineReportCategory] = useState<"LINK"|"IMAGE"|"VIDEO">("LINK");
+  const [inlineReportOpen,setInlineReportOpen] = useState(false);
+  const [inlineReportLoading,setInlineReportLoading] = useState(false);
+  const [inlineReportError,setInlineReportError] = useState("");
+  const [signalViewer,setSignalViewer] = useState<Artifact|null>(null);
+  const [signalViewerOpen,setSignalViewerOpen] = useState(false);
+  const [ultimateLiveLines,setUltimateLiveLines] = useState<string[]>([]);
+  const [ultimateFinalSummary,setUltimateFinalSummary] = useState<string[]>([]);
+  const [ultimateComplete,setUltimateComplete] = useState(false);
+  const [ultimateSummary,setUltimateSummary] = useState({
+    LINK:{checked:0,manual:0,defects:0},
+    IMAGE:{checked:0,manual:0,defects:0},
+    VIDEO:{checked:0,manual:0,defects:0}
+  });
+  const [confirmClear,setConfirmClear] = useState(false);
+  const [runnerLive,setRunnerLive] = useState(false);
+  const [browserOpening,setBrowserOpening] = useState(false);
+  const [isMobileDevice,setIsMobileDevice] = useState(false);
+  const [incognito,setIncognito] = useState(false);
+  const [incognitoExitPrompt,setIncognitoExitPrompt] = useState(false);
+  const [deletePrompt, setDeletePrompt] = useState<{ kind: "workspace" | "signal" | "extracted" | "evidence" | "source"; id: string } | null>(null);
+  const [workspaceDirty,setWorkspaceDirty] = useState(false);
+  const [workspaceSaveActive,setWorkspaceSaveActive] = useState(false);
+  const [workspacePrompt,setWorkspacePrompt] = useState<"new"|"save"|string|null>(null);
+  const [workspaceSaveName,setWorkspaceSaveName] = useState("");
+  const [mounted,setMounted] = useState(false);
+  const [account,setAccount] = useState<AccountState>(() => normalizeAccountState(null));
+  const workspaceBaselineRef = useRef("");
+  const incognitoReturnRef = useRef<{workspace:Workspace|null;name:string;state:WorkspaceState;dirty:boolean;baseline:string}|null>(null);
+
+  const RUNNER_URL = "http://127.0.0.1:18724";
+
+  function currentWorkspaceState(): WorkspaceState { return { browserUrl, investigationBrowser, selectedExtractor, signals, extractedFiles, sources, checkerReports, evidenceFiles, inlineReports, inlineReportCategory, ultimateFinalSummary, ultimateSummary }; }
+  function workspaceStateKey(state:WorkspaceState) { return JSON.stringify(state); }
+  function sortWorkspaces(items:Workspace[]) { return [...items].sort((a,b)=>String(a.name).localeCompare(String(b.name),undefined,{numeric:true,sensitivity:"base"})); }
+  function markWorkspaceClean(state:WorkspaceState) { workspaceBaselineRef.current=workspaceStateKey(state); setWorkspaceDirty(false); }
+  function applyWorkspaceState(state:Partial<WorkspaceState>) {
+    setBrowserUrl(String(state.browserUrl||"")); setInvestigationBrowser(String(state.investigationBrowser||"chrome")); setSelectedExtractor(String(state.selectedExtractor||""));
+    setSignals(Array.isArray(state.signals)?state.signals:[]); setExtractedFiles(Array.isArray(state.extractedFiles)?state.extractedFiles:[]); setSources(Array.isArray(state.sources)?state.sources:[]);
+    setCheckerReports(Array.isArray(state.checkerReports)?state.checkerReports:[]); setEvidenceFiles(Array.isArray(state.evidenceFiles)?state.evidenceFiles:[]); setInlineReports(state.inlineReports||{}); setInlineReportCategory(state.inlineReportCategory||"LINK"); setUltimateFinalSummary(Array.isArray(state.ultimateFinalSummary)?state.ultimateFinalSummary:[]);
+    setUltimateSummary(state.ultimateSummary||{LINK:{checked:0,manual:0,defects:0},IMAGE:{checked:0,manual:0,defects:0},VIDEO:{checked:0,manual:0,defects:0}});
+    setBrowserReady(false); setRunnerLive(false); setUltimateRunning(false); setUltimateComplete(false); setExtractorHasRun(false); setExtractorFinalSummary(null); setExtractorLiveLines([]); setMergeRunning(false);
+  }
+  async function fetchWorkspaceState(id:string) { const response=await fetch(`${RUNNER_URL}/workspaces/${encodeURIComponent(id)}`,{cache:"no-store"}); if(!response.ok) throw new Error("WORKSPACE COULD NOT BE LOADED"); const data=await response.json(); return data?.workspace?.state as WorkspaceState; }
+  async function persistWorkspace(item:Workspace,state:WorkspaceState) { const response=await fetch(`${RUNNER_URL}/workspaces`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({workspace:{...item,state}})}); if(!response.ok){const data=await response.json().catch(()=>({}));throw new Error(data?.error||"WORKSPACE COULD NOT BE SAVED");} return (await response.json()).workspace as Workspace; }
+
+  useEffect(() => {
+    fetch("/api/account", { cache: "no-store" }).then(async r => r.ok ? r.json() : null).then(data => { if (data?.account) setAccount(normalizeAccountState(data.account)); }).catch(() => {});
+    const mobile=/Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile/i.test(navigator.userAgent)||(navigator.maxTouchPoints>1&&window.innerWidth<768);
+    setIsMobileDevice(mobile); if(mobile){setBrowserReady(false);setRunnerLive(false);}
+    const load=async()=>{
+      try{
+        const response=await fetch(`${RUNNER_URL}/workspaces`,{cache:"no-store"}); const data=response.ok?await response.json():null; const remote=Array.isArray(data?.workspaces)?sortWorkspaces(data.workspaces as Workspace[]):[]; setWorkspaces(remote);
+        const activeId=read<string|null>(STORAGE.active,null); const chosen=remote.find((w:Workspace)=>w.id===activeId)||remote[0]||null;
+        if(chosen){const state=await fetchWorkspaceState(chosen.id);setActiveWorkspace(chosen);setWorkspaceName(chosen.name);if(state){applyWorkspaceState(state);markWorkspaceClean(state);}write(STORAGE.active,chosen.id);}
+        else { const initial:WorkspaceState={browserUrl:"",investigationBrowser:"chrome",selectedExtractor:"",signals:read<Artifact[]>(STORAGE.signals,[]),extractedFiles:[],sources:read<SourceFile[]>(STORAGE.sources,[]),checkerReports:[],evidenceFiles:[],inlineReports:{},inlineReportCategory:"LINK",ultimateFinalSummary:[],ultimateSummary:{LINK:{checked:0,manual:0,defects:0},IMAGE:{checked:0,manual:0,defects:0},VIDEO:{checked:0,manual:0,defects:0}}}; applyWorkspaceState(initial); markWorkspaceClean(initial); }
+      }catch{
+        const fallback:WorkspaceState={browserUrl:"",investigationBrowser:"chrome",selectedExtractor:"",signals:read<Artifact[]>(STORAGE.signals,[]),extractedFiles:[],sources:read<SourceFile[]>(STORAGE.sources,[]),checkerReports:[],evidenceFiles:[],inlineReports:{},inlineReportCategory:"LINK",ultimateFinalSummary:[],ultimateSummary:{LINK:{checked:0,manual:0,defects:0},IMAGE:{checked:0,manual:0,defects:0},VIDEO:{checked:0,manual:0,defects:0}}}; applyWorkspaceState(fallback); markWorkspaceClean(fallback);
+      }
+      setCustomExtractors(read<Extractor[]>(STORAGE.extractors,[])); setInstructions([]);
+      fetch(`${RUNNER_URL}/instructions/platform`,{cache:"no-store"}).then(async r=>r.ok?r.json():null).then(data=>{if(data?.content)setInstructions([{id:"platform-based-project-instruction",name:"Platform-Based Project Instruction",kind:"INSTRUCTIONS",createdAt:"",content:data.content}]);}).catch(()=>{});
+    }; void load();
+  },[]);
+
+  useEffect(() => { if (activeWorkspace) write(STORAGE.active, activeWorkspace.id); }, [activeWorkspace]);
+  useEffect(()=>{ if(!workspaceBaselineRef.current)return; setWorkspaceDirty(workspaceStateKey(currentWorkspaceState())!==workspaceBaselineRef.current); },[browserUrl,investigationBrowser,selectedExtractor,signals,extractedFiles,sources,checkerReports,evidenceFiles,inlineReports,inlineReportCategory,ultimateFinalSummary,ultimateSummary]);
+  useEffect(() => {
+    if (!workspaceDirty) return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [workspaceDirty]);
+
+  const validBrowserUrl = useMemo(() => {
+    try {
+      const parsed = new URL(browserUrl.trim());
+      return (parsed.protocol === "http:" || parsed.protocol === "https:") && Boolean(parsed.hostname);
+    } catch {
+      return false;
+    }
+  }, [browserUrl]);
+
+  useEffect(() => {
+    if (!browserReady) return;
+    const pollActionId = browserActionRef.current;
+    const poll = async () => {
+      try {
+        const response = await fetch(`${RUNNER_URL}/browser/current?browser=${encodeURIComponent(investigationBrowser)}`, { cache: "no-store" });
+        if (!response.ok) throw new Error();
+        const data = await response.json();
+        if (browserActionRef.current !== pollActionId) return;
+        setRunnerLive(true);
+        if (data.currentPage && data.currentPage !== "about:blank") setBrowserUrl(data.currentPage);
+      } catch {
+        if (browserActionRef.current !== pollActionId) return;
+        setBrowserReady(false);
+        setRunnerLive(false);
+        setStatus("INVESTIGATION BROWSER CLOSED");
+      }
+    };
+    poll();
+    const timer = window.setInterval(poll, 1000);
+    return () => window.clearInterval(timer);
+  }, [browserReady, investigationBrowser]);
+
+  useEffect(() => {
+    if (!browserReady || !runnerLive || incognito) return;
+
+    const pollDownloads = async () => {
+      try {
+        const response = await fetch(
+          `${RUNNER_URL}/browser/downloads?browser=${encodeURIComponent(investigationBrowser)}`,
+          { cache: "no-store" }
+        );
+
+        if (!response.ok) return;
+
+        const data = await response.json();
+        const downloads = Array.isArray(data?.downloads) ? data.downloads : [];
+
+        if (!downloads.length) return;
+
+        const additions: EvidenceFile[] = [];
+
+        for (const download of downloads) {
+          const name = String(download?.name || "download");
+          const extension = name.toLowerCase().split(".").pop() || "";
+
+          let category: EvidenceFile["category"] | null = null;
+
+          if (["jpg", "jpeg", "png"].includes(extension)) {
+            category = "IMAGE";
+          } else if (extension === "mp4") {
+            category = "VIDEO";
+          } else if (["log", "chls", "chlsj", "chlz"].includes(extension)) {
+            category = "LOG";
+          }
+
+          if (!category || !download?.dataUrl) continue;
+
+          additions.push({
+            id: String(download.id || crypto.randomUUID()),
+            name,
+            category,
+            createdAt: String(download.createdAt || new Date().toISOString()),
+            type: String(download.type || "application/octet-stream"),
+            size: Number(download.size || 0),
+            dataUrl: String(download.dataUrl),
+          });
+        }
+
+        if (additions.length) {
+          setEvidenceFiles(previous => [...previous, ...additions]);
+          setStatus(`${additions.length} BROWSER DOWNLOAD(S) ADDED TO EVIDENCE`);
+        }
+      } catch {}
+    };
+
+    pollDownloads();
+
+    const timer = window.setInterval(pollDownloads, 750);
+
+    return () => window.clearInterval(timer);
+  }, [browserReady, runnerLive, investigationBrowser, incognito]);
+  const allExtractors = useMemo(() => [...EXTRACTORS,...customExtractors], [customExtractors]);
+  const visibleExtractors = useMemo(() => {
+    if (account.tier === "NOVICE") return allExtractors.filter(e => !e.id.includes("academy"));
+    return allExtractors;
+  }, [allExtractors, account.tier]);
+  const featureVisible = (feature: FeatureKey) => canShowFeature(account, feature);
+  const extractorVisible = (extractor: Extractor) => account.tier !== "NOVICE" || !/Academy/i.test(extractor.name);
+  const visibleTierExtractors = visibleExtractors.filter(extractorVisible);
+  useEffect(() => {
+    if (selectedExtractor && !visibleExtractors.some(e => e.id === selectedExtractor)) setSelectedExtractor("");
+  }, [selectedExtractor, visibleExtractors]);
+  const displayedSources = useMemo<SourceFile[]>(()=>[{id:"platform-project-instruction",name:"1. Project Instructions.txt",kind:"INSTRUCTIONS",createdAt:""},...sources],[sources]);
+  const visibleSignals = signals;
+
+  async function saveWorkspaceWithName(name:string){
+    const trimmed=name.trim(); if(!trimmed){setStatus("WORKSPACE NAME REQUIRED");return false;} const now=new Date().toISOString();
+    const item:Workspace=activeWorkspace?{...activeWorkspace,name:trimmed,updatedAt:now}:{id:crypto.randomUUID(),name:trimmed,createdAt:now,updatedAt:now};
+    try{const saved=await persistWorkspace(item,currentWorkspaceState());const next=sortWorkspaces([...workspaces.filter(w=>w.id!==saved.id),saved]);setWorkspaces(next);setActiveWorkspace(saved);setWorkspaceName(saved.name);markWorkspaceClean(currentWorkspaceState());write(STORAGE.active,saved.id);setStatus("WORKSPACE SAVED");return true;}catch(error){setStatus(error instanceof Error?error.message:"WORKSPACE COULD NOT BE SAVED");return false;}
+  }
+  function saveWorkspace(){setWorkspaceSaveName(workspaceName.trim());setWorkspacePrompt("save");}
+  useEffect(()=>{setMounted(true)},[]);
+  function createFreshWorkspace(){const blank:WorkspaceState={browserUrl:"",investigationBrowser:"chrome",selectedExtractor:"",signals:[],extractedFiles:[],sources:[],checkerReports:[],evidenceFiles:[],inlineReports:{},inlineReportCategory:"LINK",ultimateFinalSummary:[],ultimateSummary:{LINK:{checked:0,manual:0,defects:0},IMAGE:{checked:0,manual:0,defects:0},VIDEO:{checked:0,manual:0,defects:0}}};setActiveWorkspace(null);setWorkspaceName("");applyWorkspaceState(blank);markWorkspaceClean(blank);write(STORAGE.active,null);setStatus("NEW WORKSPACE");}
+  function enterIncognito(){
+    if(incognito)return;
+    if(workspaceDirty){setWorkspacePrompt("incognito");setWorkspaceSaveName(activeWorkspace?.name||"");return;}
+    incognitoReturnRef.current={workspace:activeWorkspace,name:workspaceName,state:currentWorkspaceState(),dirty:workspaceDirty,baseline:workspaceBaselineRef.current};
+    const blank:WorkspaceState={browserUrl:"",investigationBrowser:"chrome",selectedExtractor:"",signals:[],extractedFiles:[],sources:[],checkerReports:[],evidenceFiles:[],inlineReports:{},inlineReportCategory:"LINK",ultimateFinalSummary:[],ultimateSummary:{LINK:{checked:0,manual:0,defects:0},IMAGE:{checked:0,manual:0,defects:0},VIDEO:{checked:0,manual:0,defects:0}}};
+    setIncognito(true); setActiveWorkspace(null); setWorkspaceName(""); applyWorkspaceState(blank); markWorkspaceClean(blank); setStatus("INCOGNITO MODE ACTIVE");
+  }
+  async function exitIncognito(){
+    if(browserReady){
+      try{await fetch(`${RUNNER_URL}/browser/close`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({browser:investigationBrowser,incognito})});}catch{}
+    }
+    const previous=incognitoReturnRef.current;
+    if(previous){ setIncognito(false); setActiveWorkspace(previous.workspace); setWorkspaceName(previous.name); applyWorkspaceState(previous.state); workspaceBaselineRef.current=previous.baseline; setWorkspaceDirty(previous.dirty); incognitoReturnRef.current=null; setStatus("INCOGNITO MODE CLOSED"); } else { setIncognito(false); setStatus("READY"); }
+  }
+  function requestNewWorkspace(){if(workspaceDirty){setWorkspacePrompt("new");setWorkspaceSaveName(activeWorkspace?.name||"");return;}createFreshWorkspace();}
+  async function loadWorkspace(id:string,list=workspaces){const item=list.find(w=>w.id===id);if(!item)return;try{const state=await fetchWorkspaceState(id);setActiveWorkspace(item);setWorkspaceName(item.name);applyWorkspaceState(state||{});markWorkspaceClean(state||currentWorkspaceState());write(STORAGE.active,id);setStatus("WORKSPACE OPEN");}catch(error){setStatus(error instanceof Error?error.message:"WORKSPACE COULD NOT BE LOADED");}}
+  function requestLoadWorkspace(id:string){if(activeWorkspace?.id===id)return;if(workspaceDirty){setWorkspacePrompt(id);setWorkspaceSaveName(activeWorkspace?.name||"");return;}void loadWorkspace(id);}
+  async function discardAndContinue(){const target=workspacePrompt;setWorkspacePrompt(null);setWorkspaceSaveName("");if(target==="new")createFreshWorkspace();else if(target==="incognito")enterIncognito();else if(target==="profile")window.location.href="/workstation/profile";else if(target)await loadWorkspace(target);}
+  async function savePromptAndContinue(){const target=workspacePrompt;const name=workspaceSaveName;setWorkspacePrompt(null);const saved=await saveWorkspaceWithName(name);setWorkspaceSaveName("");if(!saved){setWorkspacePrompt(target);setWorkspaceSaveName(name);return;}if(target==="new")createFreshWorkspace();else if(target==="incognito")enterIncognito();else if(target==="profile")window.location.href="/workstation/profile";else if(target && target!=="save")await loadWorkspace(target);}
+  async function deleteWorkspace(id:string){try{const response=await fetch(`${RUNNER_URL}/workspaces/${encodeURIComponent(id)}`,{method:"DELETE"});if(!response.ok)throw new Error("WORKSPACE COULD NOT BE DELETED");setWorkspaces(workspaces.filter(w=>w.id!==id));if(activeWorkspace?.id===id)createFreshWorkspace();else setStatus("WORKSPACE DELETED");}catch(error){setStatus(error instanceof Error?error.message:"WORKSPACE DELETE FAILED");}}
+
+  function resetExtractorToIdle(message:string) {
+    setExtractorHasRun(false);
+    setExtractorLiveLines([]);
+    setExtractorFinalSummary(null);
+    setMergeRunning(false);
+    setStatus(message);
+  }
+
+  function closeUltimateChecker() {
+    setUltimateRunning(false);
+    setUltimateComplete(false);
+    setUltimateLiveLines([]);
+    setUltimateFinalSummary([]);
+    setUltimateSummary({
+      LINK:{checked:0,manual:0,defects:0},
+      IMAGE:{checked:0,manual:0,defects:0},
+      VIDEO:{checked:0,manual:0,defects:0}
+    });
+    setCheckerReports([]);
+    setInlineReportOpen(false);
+    setInlineReportLoading(false);
+    setInlineReportError("");
+    setInlineReports({});
+    setStatus("READY");
+  }
+
+  function clearWorkspace() {
+    if (!confirmClear) { setConfirmClear(true); return; }
+    setConfirmClear(false); setSignals([]); setExtractedFiles([]); setCheckerReports([]); setEvidenceFiles([]); setSources([]); setBrowserUrl(""); setBrowserReady(false);
+    resetExtractorToIdle("WORKSPACE CLEARED");
+  }
+
+  async function toggleBrowser() {
+    if (isMobileDevice) { setStatus("DESKTOP REQUIRED"); return; }
+    const value = browserUrl.trim();
+    if (browserOpening) return;
+    const actionId = ++browserActionRef.current;
+
+    if (browserReady && runnerLive) {
+      setBrowserOpening(true);
+      setStatus("CLOSING INVESTIGATION BROWSER...");
+      try {
+        const response = await fetch(`${RUNNER_URL}/browser/close`, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-v1124-device": isMobileDevice ? "mobile" : "desktop" },
+          body: JSON.stringify({ browser: investigationBrowser }),
+        });
+        if (!response.ok) throw new Error("BROWSER COULD NOT CLOSE");
+        if (browserActionRef.current !== actionId) return;
+        setBrowserReady(false);
+        setRunnerLive(false);
+        setStatus("INVESTIGATION BROWSER CLOSED");
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : "BROWSER COULD NOT CLOSE");
+      } finally {
+        setBrowserOpening(false);
+      }
+      return;
+    }
+
+    if (!value || !validBrowserUrl) {
+      setStatus("ENTER A VALID PAGE URL FIRST");
+      return;
+    }
+
+    setBrowserOpening(true);
+    setStatus("CONNECTING TO LOCAL BROWSER RUNNER...");
+    try {
+      const health = await fetch(`${RUNNER_URL}/health`, { cache: "no-store" });
+      if (!health.ok) throw new Error("RUNNER NOT CONNECTED");
+
+      const response = await fetch(`${RUNNER_URL}/browser/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ browser: investigationBrowser, url: value, incognito }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || "BROWSER COULD NOT OPEN");
+      if (browserActionRef.current !== actionId) return;
+
+      setRunnerLive(true);
+      setBrowserReady(true);
+      if (data.currentPage && data.currentPage !== "about:blank") setBrowserUrl(data.currentPage);
+      setStatus("INVESTIGATION BROWSER LIVE");
+      const history = read<string[]>(STORAGE.history, []);
+      write(STORAGE.history, [value, ...history.filter(x => x !== value)].slice(0, 50));
+    } catch (error) {
+      setRunnerLive(false);
+      setBrowserReady(false);
+      setStatus(error instanceof Error && error.message !== "Failed to fetch"
+        ? error.message
+        : "RUNNER NOT CONNECTED • START THE LOCAL WORKSTATION RUNNER");
+    } finally {
+      if (browserActionRef.current === actionId) setBrowserOpening(false);
+    }
+  }
+
+  const evidenceAccept: Record<EvidenceFile["category"], string[]> = {
+    IMAGE: ["jpg","jpeg","png"],
+    VIDEO: ["mp4"],
+    LOG: ["log","chls","chlsj","chlz"],
+  };
+
+  function evidenceCategoryFor(file: File): EvidenceFile["category"] | null {
+    const extension = file.name.toLowerCase().split(".").pop() || "";
+    for (const category of Object.keys(evidenceAccept) as EvidenceFile["category"][]) {
+      if (evidenceAccept[category].includes(extension)) return category;
+    }
+    return null;
+  }
+
+  async function uploadEvidenceFiles(category: EvidenceFile["category"], event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files || []) as File[];
+    const accepted = files.filter(file => evidenceCategoryFor(file) === category);
+    if (!accepted.length) {
+      setStatus(`NO VALID ${category} EVIDENCE FILES SELECTED`);
+      event.target.value = "";
+      return;
+    }
+
+    const additions: EvidenceFile[] = [];
+    for (const file of accepted) {
+      try {
+        const dataUrl = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = () => reject(reader.error);
+          reader.readAsDataURL(file);
+        });
+        additions.push({
+          id: crypto.randomUUID(),
+          name: file.name,
+          category,
+          createdAt: new Date().toISOString(),
+          type: file.type || "application/octet-stream",
+          size: file.size,
+          dataUrl,
+        });
+      } catch {}
+    }
+
+    if (additions.length) {
+      setEvidenceFiles(previous => [...previous, ...additions]);
+      setStatus(`${additions.length} ${category} EVIDENCE FILE(S) ADDED`);
+    } else {
+      setStatus("EVIDENCE UPLOAD FAILED");
+    }
+    event.target.value = "";
+  }
+
+  function deleteEvidenceFile(id: string) { setDeletePrompt({ kind: "evidence", id }); }
+
+  function downloadEvidenceFile(file: EvidenceFile) {
+    const link = document.createElement("a");
+    link.href = file.dataUrl;
+    link.download = file.name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setStatus("EVIDENCE FILE DOWNLOADED");
+  }
+
+  function uploadCustomExtractors(event:ChangeEvent<HTMLInputElement>) {
+    const files=Array.from(event.target.files || []) as File[];
+    const additions=files.map(file=>({id:crypto.randomUUID(),name:file.name,platform:"Custom",description:"Uploaded platform-based extractor."}));
+    const next=[...customExtractors,...additions]; setCustomExtractors(next); write(STORAGE.extractors,next); setStatus(`${additions.length} EXTRACTOR(S) ADDED`); event.target.value="";
+  }
+  async function renameSource(id:string,currentName:string){const trimmed=window.prompt("Rename source",currentName)?.trim();if(!trimmed)return;setSources(prev=>prev.map(source=>source.id===id?{...source,name:trimmed}:source));setStatus("SOURCE RENAMED");}
+
+  async function deleteSource(id:string){if(id==="platform-project-instruction")return;setDeletePrompt({ kind: "source", id });}
+
+  async function uploadSourceFiles(event:ChangeEvent<HTMLInputElement>){const files=Array.from(event.target.files||[]) as File[];const additions:SourceFile[]=[];for(const file of files){try{additions.push({id:crypto.randomUUID(),name:file.name,kind:"SOURCE",createdAt:new Date().toISOString(),content:await file.text()});}catch{}}if(additions.length){setSources(prev=>[...prev,...additions]);setStatus(`${additions.length} SOURCE FILE(S) ADDED`);}else setStatus("SOURCE UPLOAD FAILED");event.target.value="";}
+
+  async function pollExtractorJob(jobId:string, onDone:(data:any)=>void) {
+    const timer=window.setInterval(async()=>{
+      try {
+        const response=await fetch(`${RUNNER_URL}/extractor/status?job=${encodeURIComponent(jobId)}`,{cache:"no-store"});
+        if(!response.ok) throw new Error("EXTRACTOR STATUS UNAVAILABLE");
+        const data=await response.json();
+        setExtractorLiveLines(Array.isArray(data.messages)?data.messages.filter((line:any)=>String(line).trim().toLowerCase()!=="console.clear").slice(-3):[]);
+        if(data.status==="COMPLETE"||data.status==="FAILED") { window.clearInterval(timer); onDone(data); }
+      } catch(error) { window.clearInterval(timer); setRunning(false); setMergeRunning(false); setStatus(error instanceof Error?error.message:"EXTRACTOR STATUS FAILED"); }
+    },350);
+  }
+
+  async function runExtractor() {
+    if (!featureVisible("extractors")) { setStatus("EXTRACTORS ARE NOT AVAILABLE"); return; }
+    if(isMobileDevice){setStatus("DESKTOP REQUIRED");return;}
+    if(ultimateRunning){setStatus("ULTIMATE CHECKER IS RUNNING");return;}
+    if(!selectedExtractor){setStatus("CHOOSE AN EXTRACTOR");return;}
+    if(!browserReady){setStatus("OPEN THE INVESTIGATION BROWSER FIRST");return;}
+    setRunning(true); setExtractorHasRun(true); setExtractorFinalSummary(null); setExtractorLiveLines([`RUN EXTRACTOR: ${allExtractors.find(e=>e.id===selectedExtractor)?.name || selectedExtractor}`]); setStatus("RUNNING EXTRACTOR...");
+    try {
+      const response=await fetch(`${RUNNER_URL}/extractor/run`,{method:"POST",headers:{"content-type":"application/json", "x-v1124-device": isMobileDevice ? "mobile" : "desktop"},body:JSON.stringify({browser:investigationBrowser,extractor:selectedExtractor,incognito})});
+      const data=await response.json().catch(()=>({}));
+      if(!response.ok) throw new Error(data.error||"EXTRACTOR COULD NOT START");
+      await new Promise<void>(resolve=>pollExtractorJob(data.jobId, result=>{
+        if(result.status==="FAILED") {
+          const fallbackExtractor=String(allExtractors.find(e=>e.id===selectedExtractor)?.name||selectedExtractor).replace(/\.txt$/i, "");
+          setExtractorFinalSummary({
+            discovered:0, successful:0, failed:1, generated:0,
+            extractor:String(result.summary?.extractor||fallbackExtractor),
+            source:String(result.summary?.source||browserUrl||""),
+            failures:[], failedRun:true,
+            errorMessage:"The selected extractor cannot run on the current page.\nOpen the required page and run the extractor again."
+          });
+          setStatus("EXTRACTION FAILED");
+        } else { setExtractedFiles(prev=>[...prev.filter(a=>a.kind!=="MASTER"),...(result.files||[]).map((file:any)=>({id:crypto.randomUUID(),name:file.name,kind:"JSON",createdAt:new Date().toISOString(),content:file.content}))]); setExtractorFinalSummary({discovered:Number(result.summary?.discovered||0),successful:Number(result.summary?.successful||result.files?.length||0),failed:Number(result.summary?.failed||0),generated:Number(result.summary?.generated||result.files?.length||0),extractor:String(result.summary?.extractor||allExtractors.find(e=>e.id===selectedExtractor)?.name||selectedExtractor).replace(/\.txt$/i, ""),source:String(result.summary?.source||""),failures:Array.isArray(result.summary?.failures)?result.summary.failures.map((failure:any)=>({url:String(failure?.url||""),error:String(failure?.error||"Extraction failed.")})):[]}); setStatus(`EXTRACTION COMPLETE • ${result.files?.length||0} JSON FILES`); }
+        setRunning(false); resolve();
+      }));
+    } catch(error) { setRunning(false); setStatus(error instanceof Error?error.message:"EXTRACTOR FAILED"); }
+  }
+
+  async function mergeExtractors() {
+    setExtractorFinalSummary(null);
+    const json=extractedFiles.filter(a=>a.kind==="JSON"); if(!json.length){setStatus("NO EXTRACTOR JSON FILES TO MERGE");return;}
+    setMergeRunning(true); setExtractorLiveLines(["MERGE JSON STARTED",`Loading ${json.length} extracted JSON file(s)...`]); setStatus("MERGING JSON...");
+    try {
+      const response=await fetch(`${RUNNER_URL}/extractor/merge`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({files:json.map(({name,content})=>({name,content}))})});
+      const data=await response.json().catch(()=>({}));
+      if(!response.ok) throw new Error(data.error||"MERGE JSON COULD NOT START");
+      await new Promise<void>(resolve=>pollExtractorJob(data.jobId, result=>{
+        if(result.status==="FAILED") setStatus(result.error||"MERGE JSON FAILED");
+        else { const master=result.master; if(master) setExtractedFiles(prev=>[...prev.filter(a=>a.kind!=="MASTER"),{id:crypto.randomUUID(),name:master.name,kind:"MASTER",createdAt:new Date().toISOString(),content:master.content}]); setStatus("MERGE JSON COMPLETE"); }
+        setMergeRunning(false); resolve();
+      }));
+    } catch(error) { setMergeRunning(false); setStatus(error instanceof Error?error.message:"MERGE JSON FAILED"); }
+  }
+
+  async function uploadAvailableToSource(){const master=extractedFiles.find(a=>a.kind==="MASTER");const json=extractedFiles.filter(a=>a.kind==="JSON");const upload=master||(json.length===1?json[0]:null);if(!upload?.content){setStatus(master?"NO MASTER JSON TO UPLOAD":"MERGE JSON BEFORE UPLOADING MULTIPLE FILES");return;}setSources(prev=>[...prev,{id:crypto.randomUUID(),name:upload.name,kind:"SOURCE",createdAt:new Date().toISOString(),content:upload.content}]);setExtractedFiles([]);resetExtractorToIdle(master?"MASTER JSON ADDED TO SOURCE":"JSON ADDED TO SOURCE");}
+
+
+
+  function addUltimateLiveLine(message:string) {
+    if(!message.trim()) return;
+    setUltimateLiveLines(previous=>[...previous,message].slice(-2));
+  }
+
+  function ultimateExtractValue(message:string, patterns:RegExp[]) {
+    for(const pattern of patterns){
+      const match=message.match(pattern);
+      if(match) return match[1].trim();
+    }
+    return "";
+  }
+
+  function parseUltimateSummary(message:string) {
+    const match=message.match(
+      /^ULTIMATE\s+(LINK|IMAGE|VIDEO)\s+SUMMARY:\s+CHECKED\s+(\d+)\s+\|\s+MANUAL\s+(\d+)\s+\|\s+DEFECTS\s+(\d+)$/im
+    );
+    if(match){
+      const category=match[1] as "LINK"|"IMAGE"|"VIDEO";
+      setUltimateSummary(previous=>({
+        ...previous,
+        [category]:{
+          checked:Number(match[2]),
+          manual:Number(match[3]),
+          defects:Number(match[4])
+        }
+      }));
+    }
+  }
+
+  function buildUltimateFinalSummary(messages:string[]) {
+    const completeMessage=messages.find(message=>message.includes("MASTER SCAN COMPLETE"));
+    if(!completeMessage) return [];
+
+    const pageValue=ultimateExtractValue(completeMessage,[/^\s*Page:\s*(.+)$/im]);
+    const total=ultimateExtractValue(completeMessage,[/^\s*TOTAL CONFIRMED DEFECTS:\s*(\d+)$/im]);
+
+    const summaries:Record<"LINK"|"IMAGE"|"VIDEO",string>={
+      LINK:"CHECKED 0 | MANUAL 0 | DEFECTS 0",
+      IMAGE:"CHECKED 0 | MANUAL 0 | DEFECTS 0",
+      VIDEO:"CHECKED 0 | MANUAL 0 | DEFECTS 0"
+    };
+
+    for(const message of messages){
+      const match=message.match(
+        /^ULTIMATE\s+(LINK|IMAGE|VIDEO)\s+SUMMARY:\s+CHECKED\s+(\d+)\s+\|\s+MANUAL\s+(\d+)\s+\|\s+DEFECTS\s+(\d+)$/im
+      );
+      if(match){
+        summaries[match[1] as "LINK"|"IMAGE"|"VIDEO"]=
+          `CHECKED ${match[2]} | MANUAL ${match[3]} | DEFECTS ${match[4]}`;
+      }
+    }
+
+    const organized=[
+      "SCAN COMPLETE",
+      "Checker: Website Defect Checker v1124"
+    ];
+    if(pageValue) organized.push(`Page: ${pageValue}`);
+    organized.push(
+      `LINK ${summaries.LINK}`,
+      `IMAGE ${summaries.IMAGE}`,
+      `VIDEO ${summaries.VIDEO}`,
+      `TOTAL CONFIRMED DEFECTS ${total||"0"}`
+    );
+    return organized;
+  }
+
+  function getUltimateLineClass(message:string) {
+    if(message.includes("MANUAL VERIFICATION")) return "text-yellow-400";
+    if(message.includes("BROKEN") || message.includes("404")) return "text-red-400";
+    if(/^200\s/.test(message)) return "text-green-400";
+    if(message.includes("Checking:")) return "text-green-300";
+    return "text-green-600";
+  }
+
+  async function runUltimate() {
+    if(isMobileDevice){setStatus("DESKTOP REQUIRED");return;}
+    if(running){setStatus("EXTRACTOR IS RUNNING");return;}
+    if(!browserReady){setStatus("OPEN THE INVESTIGATION BROWSER FIRST");return;}
+
+    setUltimateRunning(true);
+    setStatus("RUNNING ULTIMATE CHECK...");
+    setCheckerReports([]);
+    setUltimateLiveLines([]);
+    setUltimateFinalSummary([]);
+    setUltimateComplete(false);
+    setUltimateSummary({
+      LINK:{checked:0,manual:0,defects:0},
+      IMAGE:{checked:0,manual:0,defects:0},
+      VIDEO:{checked:0,manual:0,defects:0}
+    });
+
+    try{
+      const response=await fetch(`${RUNNER_URL}/checker/ultimate`,{
+        method:"POST",
+        headers:{"content-type":"application/json"},
+        body:JSON.stringify({browser:investigationBrowser,incognito})
+      });
+      const data=await response.json().catch(()=>({}));
+      if(!response.ok) throw new Error(data.error||"Ultimate checker could not start.");
+
+      const jobId=String(data.jobId||"");
+      if(!jobId) throw new Error("Ultimate checker did not return a job.");
+
+      const seen=new Set<string>();
+      const allMessages:string[]=[];
+
+      while(true){
+        const statusResponse=await fetch(
+          `${RUNNER_URL}/checker/status?job=${encodeURIComponent(jobId)}&browser=${encodeURIComponent(investigationBrowser)}`,
+          {cache:"no-store"}
+        );
+        const statusData=await statusResponse.json().catch(()=>({}));
+        if(!statusResponse.ok) throw new Error(statusData.error||"Ultimate checker status unavailable.");
+
+        const messages=Array.isArray(statusData.messages)?statusData.messages:[];
+        for(const message of messages){
+          if(typeof message!=="string" || seen.has(message)) continue;
+          seen.add(message);
+          allMessages.push(message);
+          parseUltimateSummary(message);
+          if(!message.includes("MASTER SCAN COMPLETE")) addUltimateLiveLine(message);
+        }
+
+        if(statusData.status==="FAILED"){
+          throw new Error(statusData.error||"ULTIMATE CHECK FAILED");
+        }
+
+        if(statusData.status==="COMPLETE"){
+          const reports=Array.isArray(statusData.reports)
+            ? statusData.reports.map((r:{id:string;category:string;filename?:string;count?:number;content?:string})=>({
+                id:r.id,
+                category:(String(r.category).toUpperCase() as "LINK"|"IMAGE"|"VIDEO"),
+                filename:r.filename,
+                count:r.count,
+                content:r.content
+              }))
+            : [];
+          setCheckerReports(reports);
+
+          const runnerSummary=statusData.summary as {
+            LINK?:{checked:number;manual:number;defects:number};
+            IMAGE?:{checked:number;manual:number;defects:number};
+            VIDEO?:{checked:number;manual:number;defects:number};
+          }|undefined;
+
+          const safeSummary={
+            LINK:{...(runnerSummary?.LINK||{checked:0,manual:0,defects:0})},
+            IMAGE:{...(runnerSummary?.IMAGE||{checked:0,manual:0,defects:0})},
+            VIDEO:{...(runnerSummary?.VIDEO||{checked:0,manual:0,defects:0})}
+          };
+
+          setUltimateSummary(safeSummary);
+
+          if (!incognito) {
+            void fetch("/api/account", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                system: "workstation",
+                category: "ULTIMATE",
+                outcome: "success",
+                summary: safeSummary,
+              }),
+            }).catch(() => {});
+          }
+
+          const pageValue=typeof statusData.page==="string"?statusData.page:browserUrl;
+          const total=safeSummary.LINK.defects+safeSummary.IMAGE.defects+safeSummary.VIDEO.defects;
+          setUltimateFinalSummary([
+            "SCAN COMPLETE",
+            "Checker: Website Defect Checker v1124",
+            `Page: ${pageValue}`,
+            `LINK CHECKED ${safeSummary.LINK.checked} | MANUAL ${safeSummary.LINK.manual} | DEFECTS ${safeSummary.LINK.defects}`,
+            `IMAGE CHECKED ${safeSummary.IMAGE.checked} | MANUAL ${safeSummary.IMAGE.manual} | DEFECTS ${safeSummary.IMAGE.defects}`,
+            `VIDEO CHECKED ${safeSummary.VIDEO.checked} | MANUAL ${safeSummary.VIDEO.manual} | DEFECTS ${safeSummary.VIDEO.defects}`,
+            `TOTAL CONFIRMED DEFECTS ${total}`
+          ]);
+          setUltimateComplete(true);
+          setUltimateLiveLines([]);
+          setStatus("ULTIMATE CHECK COMPLETE");
+          break;
+        }
+
+        await new Promise(resolve=>window.setTimeout(resolve,500));
+      }
+    }catch(error){
+      setUltimateFinalSummary([]);
+      setUltimateComplete(false);
+      setStatus(error instanceof Error?error.message:"ULTIMATE CHECK FAILED");
+    }finally{
+      setUltimateRunning(false);
+    }
+  }
+
+  async function openInlineReport() {
+    if(!checkerReports.length){setStatus("NO CHECKER REPORTS AVAILABLE");return;}
+    setInlineReportLoading(true);
+    setInlineReportError("");
+    const loaded:Partial<Record<"LINK"|"IMAGE"|"VIDEO",{filename:string;content:string}>>={};
+
+    // Prefer the report content returned with the completed checker job.
+    for(const report of checkerReports){
+      const category=String(report.category).toUpperCase() as "LINK"|"IMAGE"|"VIDEO";
+      if(report.content){
+        loaded[category]={
+          filename:report.filename||`${category.toLowerCase()}.txt`,
+          content:report.content
+        };
+      }
+    }
+
+    // If a report was returned without inline content, fetch that exact report
+    // from the runner. This keeps the viewer tied to the report that was just generated.
+    for(const report of checkerReports){
+      const category=String(report.category).toUpperCase() as "LINK"|"IMAGE"|"VIDEO";
+      if(loaded[category]) continue;
+      try{
+        const response=await fetch(`${RUNNER_URL}/checker/report/${encodeURIComponent(report.id)}`,{cache:"no-store"});
+        const data=await response.json().catch(()=>({}));
+        if(response.ok&&typeof data.content==="string") loaded[category]={
+          filename:data.filename||report.filename||`${category.toLowerCase()}.txt`,
+          content:data.content
+        };
+      }catch{}
+    }
+
+    const first=(['LINK','IMAGE','VIDEO'] as const).find(category=>loaded[category]);
+    setInlineReports(loaded);
+    if(first){
+      setInlineReportCategory(first);
+      setInlineReportOpen(true);
+    }else{
+      setInlineReportError("NO REPORTS ARE AVAILABLE");
+      setInlineReportOpen(true);
+    }
+    setInlineReportLoading(false);
+  }
+
+  function downloadSignal(signal:Artifact) {
+    if(!signal.content) return;
+    try{
+      const blob=new Blob([signal.content],{type:"text/plain;charset=utf-8"});
+      const objectUrl=URL.createObjectURL(blob);
+      const anchor=document.createElement("a");
+      anchor.href=objectUrl;
+      anchor.download=signal.name||"signal.txt";
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(()=>URL.revokeObjectURL(objectUrl),1000);
+    }catch{
+      setStatus("SIGNAL DOWNLOAD FAILED");
+    }
+  }
+
+  function deleteSignalConfirmed(id:string) { const next=signals.filter(signal=>signal.id!==id); setSignals(next); setStatus("SIGNAL DELETED"); }
+  function deleteEvidenceConfirmed(id:string) { setEvidenceFiles(previous => previous.filter(file => file.id !== id)); setStatus("EVIDENCE FILE DELETED"); }
+  function deleteSourceConfirmed(id:string) { setSources(prev=>prev.filter(source=>source.id!==id)); setStatus("SOURCE DELETED"); }
+  function deleteExtractedConfirmed(id:string) { const remaining=extractedFiles.filter(item=>item.id!==id); setExtractedFiles(remaining); if(!remaining.some(item=>item.kind==="JSON")&&!remaining.some(item=>item.kind==="MASTER")) resetExtractorToIdle("EXTRACTED FILE DELETED"); else setStatus("EXTRACTED FILE DELETED"); }
+
+  function deleteSignal(id:string) { setDeletePrompt({ kind: "signal", id }); }
+
+  async function uploadSignalToSource(signal:Artifact){if(!signal?.content){setStatus("SIGNAL HAS NO CONTENT TO UPLOAD");return;}setSources(prev=>[...prev,{id:crypto.randomUUID(),name:signal.name,kind:"SOURCE",createdAt:new Date().toISOString(),content:signal.content}]);setStatus("SIGNAL UPLOADED TO SOURCE");}
+
+  async function saveCheckerReports() {
+    const current=inlineReports[inlineReportCategory];
+    if(!current){setStatus("NO REPORT AVAILABLE TO SAVE");return;}
+    const saved:Artifact={id:crypto.randomUUID(),name:current.filename||`${inlineReportCategory.toLowerCase()}.txt`,kind:"TXT",createdAt:new Date().toISOString(),content:current.content};
+    setSignals(previous=>[saved,...previous]);
+    setStatus(`${inlineReportCategory} REPORT SAVED TO SIGNALS`);
+  }
+
+  async function saveAllCheckerReports() {
+    if(!checkerReports.length){setStatus("NO CHECKER REPORTS AVAILABLE");return;}
+    const loaded:Partial<Record<"LINK"|"IMAGE"|"VIDEO",{filename:string;content:string}>>={};
+    for(const report of checkerReports){
+      const category=String(report.category).toUpperCase() as "LINK"|"IMAGE"|"VIDEO";
+      if(report.content){loaded[category]={filename:report.filename||`${category.toLowerCase()}.txt`,content:report.content};continue;}
+      try{
+        const response=await fetch(`${RUNNER_URL}/checker/report/${encodeURIComponent(report.id)}`,{cache:"no-store"});
+        const data=await response.json().catch(()=>({}));
+        if(response.ok&&typeof data.content==="string") loaded[category]={filename:data.filename||report.filename||`${category.toLowerCase()}.txt`,content:data.content};
+      }catch{}
+    }
+    const saved=(Object.entries(loaded) as [string,{filename:string;content:string}][]).filter(([,report])=>!!report?.content).map(([,report])=>({id:crypto.randomUUID(),name:report.filename,kind:"TXT" as const,createdAt:new Date().toISOString(),content:report.content}));
+    if(!saved.length){setStatus("NO CHECKER REPORTS AVAILABLE TO SAVE");return;}
+    setSignals(previous=>[...saved,...previous]);
+    setStatus(`${saved.length} CHECKER REPORT${saved.length===1?"":"S"} SAVED TO SIGNALS`);
+  }
+
+  function openSignalViewer(signal:Artifact) {
+    if(!signal?.content){setStatus("SIGNAL HAS NO CONTENT TO VIEW");return;}
+    setSignalViewer(signal);
+    setSignalViewerOpen(true);
+  }
+
+  function closeSignalViewer() {
+    setSignalViewerOpen(false);
+    setSignalViewer(null);
+  }
+
+  return (
+    <>
+      {mounted && incognitoExitPrompt ? createPortal(
+        <div role="dialog" aria-modal="true" className="fixed inset-0 z-[2147483647] flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-md rounded-2xl border border-red-400/20 bg-[#020608] p-5 text-white shadow-[0_0_40px_rgba(255,80,80,.16)]">
+            <p className="text-xs font-black tracking-[0.2em] text-red-300">INCOGNITO</p>
+            <h3 className="mt-2 text-xl font-black">Exit Incognito Mode?</h3>
+            <p className="mt-2 text-body leading-5 text-cyan-100/50">Your workspace was not saved while Incognito was active.</p>
+            <div className="mt-5 grid grid-cols-2 gap-2">
+              <button type="button" onClick={() => setIncognitoExitPrompt(false)} className="rounded-xl border border-white/15 bg-black px-3 py-3 text-[10px] font-black tracking-[0.12em] text-white">STAY</button>
+              <button type="button" onClick={() => { setIncognitoExitPrompt(false); exitIncognito(); }} className="rounded-xl bg-red-400 px-3 py-3 text-[10px] font-black tracking-[0.12em] text-white">EXIT</button>
+            </div>
+          </div>
+        </div>, document.body) : null}
+
+      <DeleteConfirmModal
+        open={deletePrompt !== null}
+        label={deletePrompt?.kind === "workspace" ? "WORKSPACE MANAGEMENT" : deletePrompt?.kind === "signal" ? "WORKSPACE SIGNALS" : deletePrompt?.kind === "extracted" ? "WORKSPACE EXTRACTORS" : deletePrompt?.kind === "evidence" ? "EVIDENCE" : "WORKSPACE SOURCES"}
+        message={deletePrompt?.kind === "workspace" ? "Delete this workspace? This cannot be undone." : deletePrompt?.kind === "signal" ? "Delete this signal? This cannot be undone." : deletePrompt?.kind === "extracted" ? "Delete this extracted json? This cannot be undone." : deletePrompt?.kind === "evidence" ? "Delete this evidence? This cannot be undone." : "Delete this source? This cannot be undone."}
+        onCancel={() => setDeletePrompt(null)}
+        onConfirm={() => {
+          const prompt = deletePrompt;
+          setDeletePrompt(null);
+          if (!prompt) return;
+          if (prompt.kind === "workspace") void deleteWorkspace(prompt.id);
+          if (prompt.kind === "signal") deleteSignalConfirmed(prompt.id);
+          if (prompt.kind === "evidence") deleteEvidenceConfirmed(prompt.id);
+          if (prompt.kind === "source") deleteSourceConfirmed(prompt.id);
+          if (prompt.kind === "extracted") deleteExtractedConfirmed(prompt.id);
+        }}
+      />
+
+      {mounted && workspacePrompt ? createPortal(<div role="dialog" aria-modal="false" aria-labelledby="workspace-prompt-title" className="fixed left-1/2 top-1/2 z-[2147483647] w-[calc(100vw-2rem)] max-w-md -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-cyan-400/30 bg-[#020608] p-5 text-white shadow-[0_0_40px_rgba(0,220,255,.18)]" onMouseDown={e=>e.stopPropagation()} onClick={e=>e.stopPropagation()}><p className="text-xs font-black tracking-[0.2em] text-cyan-400">{workspacePrompt==="save"?"SAVE CHANGES":"UNSAVED CHANGES"}</p><h3 id="workspace-prompt-title" className="mt-2 text-xl font-black">{workspacePrompt==="save"?"SAVE CURRENT DATA?":"SAVE BEFORE LEAVING?"}</h3><p className="mt-2 text-body leading-5 text-cyan-100/50">{workspacePrompt==="save"?"Save the current workspace data under this workspace name.":"This workspace has changes that have not been saved."}</p><input autoFocus value={workspaceSaveName} onChange={e=>setWorkspaceSaveName(e.target.value)} placeholder="Workspace name" className="mt-4 w-full rounded-xl border border-cyan-400/30 bg-black px-3 py-3 text-xs outline-none"/><div className={`mt-4 grid gap-2 ${workspacePrompt==="save"?"grid-cols-2":"grid-cols-3"}`}><button type="button" onClick={()=>void savePromptAndContinue()} className="rounded-xl bg-cyan-400 px-3 py-3 text-[10px] font-black tracking-[0.12em] text-black">SAVE</button>{workspacePrompt!=="save"&&<button type="button" onClick={()=>void discardAndContinue()} className="rounded-xl border border-red-400/40 bg-red-400/5 px-3 py-3 text-[10px] font-black tracking-[0.12em] text-red-300">DISCARD</button>}<button type="button" onClick={()=>{setWorkspacePrompt(null);setWorkspaceSaveName("")}} className="rounded-xl border border-white/20 bg-black px-3 py-3 text-[10px] font-black tracking-[0.12em] text-white">CANCEL</button></div></div>,document.body):null}
+      {signalViewerOpen&&signalViewer&&<div role="dialog" aria-modal="true" aria-labelledby="signal-viewer-title" className="fixed inset-0 z-[2147483647] flex items-center justify-center bg-black/75 p-4" onMouseDown={e=>e.stopPropagation()} onClick={e=>e.stopPropagation()}>
+        <div className="flex h-[min(85vh,760px)] w-full max-w-5xl flex-col overflow-hidden rounded-[24px] border border-cyan-400/40 bg-[#020a0d] text-white shadow-[0_0_50px_rgba(0,220,255,.18)]">
+          <div className="flex items-center justify-between gap-4 border-b border-cyan-400/20 bg-cyan-400/5 px-5 py-4">
+            <div className="min-w-0"><p className="text-xs font-black tracking-[0.2em] text-cyan-400">SIGNAL VIEWER</p><h3 id="signal-viewer-title" className="mt-1 truncate text-lg font-black">{signalViewer.name}</h3></div>
+            <button type="button" onClick={closeSignalViewer} className="shrink-0 rounded-lg border border-cyan-400/40 bg-cyan-400/5 px-3 py-2 text-[10px] font-black tracking-[0.12em] text-cyan-300">CLOSE</button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto overscroll-contain bg-[#010608] p-5 font-mono text-xs leading-5 text-cyan-100 sm:text-sm"><pre className="whitespace-pre-wrap break-words select-text">{signalViewer.content}</pre></div>
+        </div>
+      </div>}
+
+    <main className="min-h-screen overflow-hidden bg-[#020608] text-white">
+      <div className="pointer-events-none fixed inset-0 opacity-30"><div className="absolute inset-0" style={{backgroundImage:"linear-gradient(rgba(0,220,255,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(0,220,255,0.06) 1px, transparent 1px)",backgroundSize:"42px 42px"}}/></div>
+      <div className="pointer-events-none fixed left-0 top-0 h-full w-24 border-r border-cyan-400/15"/><div className="pointer-events-none fixed right-0 top-0 h-full w-24 border-l border-cyan-400/15"/>
+      <div className="relative mx-auto min-h-screen max-w-6xl px-5 py-8 sm:px-10 sm:py-10">
+<header className="mx-auto max-w-4xl text-center">
+          <img src="/bug-workstation-logo.png" alt="v1124 Bug WorkStation" className="mx-auto h-auto w-full max-w-[12rem] object-contain"/>
+          <p className="mt-5 text-xs font-semibold tracking-[0.14em] text-cyan-100/65 sm:text-sm">A SPECIALIZED WORKSPACE FOR AUTOMATED WEBSITE INVESTIGATION</p>
+          <p className="mt-4 text-label font-black tracking-[0.16em] text-cyan-400">INVESTIGATION BROWSER &nbsp;|&nbsp; <span className="text-green-400">ULTIMATE CHECKER</span> &nbsp;|&nbsp; SIGNALS &nbsp;|&nbsp; EXTRACTORS &nbsp;|&nbsp; EVIDENCES &nbsp;|&nbsp; SOURCE HIERARCHY &nbsp;|&nbsp; PROJECT INSTRUCTION</p>
+        </header>
+
+        <section className={`mx-auto mt-10 max-w-5xl rounded-[28px] border p-5 shadow-[0_0_40px_rgba(0,220,255,.08)] sm:p-7 ${incognito?"border-red-500/30 bg-black/70":"border-cyan-400/30 bg-black/70"}`}>
+          <div className={`flex flex-col gap-4 border-b pb-5 sm:flex-row sm:items-center sm:justify-between ${incognito?"border-red-500/20":"border-cyan-400/20"}`}><div><p className={`text-xs font-black tracking-[0.22em] ${incognito?"text-red-400":"text-cyan-400"}`}>WORKSPACE MANAGEMENT</p><div className="mt-2 flex items-center gap-3"><h2 className="text-2xl font-black">WORKSPACE</h2>{!incognito&&workspaces.length>0&&<span className="rounded-lg border border-cyan-400/20 bg-cyan-400/5 px-2 py-1 text-[9px] font-black tracking-[0.12em] text-cyan-300">{workspaces.length}</span>}</div><p className="mt-2 text-body text-cyan-100/45">{incognito?"Incognito mode is active. Nothing in this workspace will be saved.":"Create, save, and reopen your investigation workspace."}</p></div><div className="flex flex-wrap gap-2 sm:ml-auto sm:justify-end">{incognito&&<><button type="button" disabled title="PROFILE is disabled while Incognito is active" className="cursor-not-allowed rounded-xl bg-black px-4 py-3 text-xs font-black text-black">PROFILE</button><button onClick={requestNewWorkspace} disabled title="NEW is disabled while Incognito is active" className="cursor-not-allowed rounded-xl bg-black px-4 py-3 text-xs font-black text-black">NEW</button><button onClick={saveWorkspace} disabled title="SAVE is disabled while Incognito is active" className="cursor-not-allowed rounded-xl bg-black px-4 py-3 text-xs font-black text-black">SAVE</button></>}{!incognito&&<><button type="button" onClick={()=>{if(workspaceDirty){setWorkspacePrompt("profile");setWorkspaceSaveName(activeWorkspace?.name||"");return;}window.location.href="/workstation/profile";}} className="rounded-xl border border-white/10 bg-white px-4 py-3 text-xs font-black text-black">PROFILE</button><button onClick={requestNewWorkspace} className="rounded-xl bg-cyan-400 px-4 py-3 text-xs font-black text-black">NEW</button><button onClick={async()=>{if(workspaceSaveActive)return;setWorkspaceSaveActive(true);try{await saveWorkspace();}finally{setWorkspaceSaveActive(false);}}} disabled={workspaceSaveActive || !workspaceDirty} className="rounded-xl border px-4 py-3 text-xs font-black transition" style={workspaceDirty && !workspaceSaveActive ? { backgroundColor: "#d1d5db", borderColor: "#9ca3af", color: "#000000" } : { backgroundColor: "#000000", borderColor: "#6b7280", color: "#9ca3af" }}>SAVE</button></>}<button onClick={incognito?()=>setIncognitoExitPrompt(true):enterIncognito} className={`rounded-xl px-4 py-3 text-xs font-black ${incognito?"bg-red-400 text-white":"border border-red-400/40 bg-red-400/5 text-red-300"}`}>{incognito?"EXIT INCOGNITO":"INCOGNITO"}</button></div></div>
+          {!incognito&&workspaces.length>0&&<div className="mt-4 min-h-0 overflow-y-auto overscroll-contain pr-1" style={{maxHeight:"10rem",minHeight:0,overflowY:"auto"}}><div className="grid gap-2 sm:grid-cols-2">{workspaces.map(w=><div key={w.id} className={`flex items-center gap-2 rounded-xl border px-3 py-3 ${activeWorkspace?.id===w.id?"border-cyan-300 bg-cyan-400/10":"border-cyan-400/15"}`}><button onClick={()=>requestLoadWorkspace(w.id)} className={`min-w-0 flex-1 text-left text-xs ${activeWorkspace?.id===w.id?"text-cyan-200":"text-cyan-100/60"}`}>{w.name}</button><button type="button" onClick={()=>setDeletePrompt({kind:"workspace",id:w.id})} className="shrink-0 rounded-lg border border-red-400/40 bg-red-400/5 px-2 py-1 text-[9px] font-black tracking-[0.12em] text-red-300">DELETE</button></div>)}</div></div>}
+        </section>
+
+        {featureVisible("browser") && <section className={`mt-6 rounded-[28px] border border-cyan-400/30 bg-black/70 p-5 sm:p-7 ${isMobileDevice ? "opacity-40" : ""}`}> 
+          <div className="flex flex-col gap-3 border-b border-cyan-400/20 pb-5 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-xs font-black tracking-[0.22em] text-cyan-400">INVESTIGATION BROWSER</p>
+              <h2 className="mt-2 text-3xl font-black">SESSION</h2>
+              <p className="mt-2 text-body leading-5 text-cyan-100/45">Open an Investigation Browser session for authentication, navigation, extraction, defect checking, and investigation work.</p>{isMobileDevice&&<p className="mt-3 text-[10px] font-black tracking-[0.16em] text-red-400">DESKTOP REQUIRED • SESSION DISABLED ON MOBILE</p>}{incognito&&<p className="mt-3 text-[10px] font-black tracking-[0.16em] text-red-300">INCOGNITO MODE • SESSION WILL NOT BE SAVED</p>}
+            </div>
+            
+          </div>
+
+          <div className="mt-5 rounded-2xl border border-cyan-400/20 bg-cyan-400/5 p-5">
+            <label className="block">
+              <span className="text-xs font-black tracking-[0.22em] text-cyan-400">BROWSER</span>
+              <select disabled={isMobileDevice} value={investigationBrowser} onChange={e=>setInvestigationBrowser(e.target.value)} className="mt-2 w-full rounded-xl border border-cyan-400/30 bg-black px-4 py-3 text-sm text-white outline-none">
+                <option value="chrome">Chrome</option>
+                <option value="firefox">Firefox</option>
+                <option value="edge">Edge</option>
+              </select>
+            </label>
+            <p className="mt-4 rounded-xl border border-cyan-400/10 bg-black/30 px-4 py-3 text-body leading-5 text-cyan-100/45">The investigation session is persistent for the selected browser. Switching browsers may require authentication again.</p>
+          </div>
+
+          <div className="mt-5 flex flex-col gap-3 sm:flex-row">
+            <input disabled={isMobileDevice} value={browserUrl} onChange={e=>{setBrowserUrl(e.target.value);setBrowserReady(false);setRunnerLive(false);setStatus(e.target.value.trim()?"READY TO OPEN INVESTIGATION BROWSER":"ENTER A PAGE URL FIRST");}} placeholder="https://platform.example/cycle" className="min-w-0 flex-1 rounded-xl border border-cyan-400/30 bg-black px-4 py-4 text-sm outline-none placeholder:text-cyan-100/25"/>
+            <button disabled={isMobileDevice || browserOpening || (!validBrowserUrl && !(browserReady && runnerLive))} onClick={toggleBrowser} className={`rounded-xl px-5 py-4 text-xs font-black tracking-[0.14em] transition-all ${browserReady && runnerLive ? "text-white shadow-[0_0_25px_rgba(239,68,68,.35)]" : validBrowserUrl ? "bg-gradient-to-r from-cyan-400 to-sky-300 text-black" : "bg-gray-700 text-gray-500"} disabled:cursor-not-allowed disabled:opacity-100`} style={browserReady && runnerLive ? { backgroundColor: "#ef4444" } : undefined}>{browserReady && runnerLive ? "OPENED" : "OPEN BROWSER"}</button>
+          </div>
+
+          <p className="mt-3 text-body leading-5 text-cyan-100/35">Use your own browser for final reporting and screen recording.</p>
+
+          <div className="mt-5 rounded-xl border border-white/70 bg-black/30 p-4 text-xs">
+            <span className="font-black text-white">BROWSER STATUS</span>
+            {browserReady && runnerLive ? (
+              <>
+                <div className="mt-2 text-[10px] font-black tracking-[0.14em] text-red-400">ACTIVE</div>
+                <div className="mt-2 break-all font-mono text-cyan-200">{browserUrl}</div>
+                <div className="mt-2 text-cyan-100/35">SESSION ACTIVE • AUTHENTICATION STAYS IN THIS INVESTIGATION BROWSER</div>
+              </>
+            ) : (
+              <div className="mt-2 text-cyan-100/35">{status}</div>
+            )}
+          </div>
+        </section>}
+
+        {featureVisible("checker") && <section className={`mt-6 rounded-[30px] border-2 border-green-400/60 bg-[#020b06] p-5 shadow-[0_0_50px_rgba(0,255,80,.12)] sm:p-7 ${isMobileDevice ? "opacity-40" : ""}`}> <div className="flex flex-col gap-4 border-b border-green-400/20 pb-5 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-black tracking-[0.24em] text-green-400">DEFECT CHECKER</p><h2 className="mt-2 text-3xl font-black tracking-[0.06em] text-green-300">ULTIMATE CHECKER</h2><p className="mt-2 text-body leading-5 text-green-100/45">Run a full website defect check on the page you’re currently investigating.</p>{isMobileDevice&&<p className="mt-3 text-[10px] font-black tracking-[0.16em] text-red-400">DESKTOP REQUIRED • CHECKER DISABLED ON MOBILE</p>}{incognito&&<p className="mt-3 text-[10px] font-black tracking-[0.16em] text-red-300">INCOGNITO MODE • CHECKER RESULTS WILL NOT BE SAVED</p>}</div>{ultimateComplete&&<button type="button" onClick={closeUltimateChecker} className="self-start rounded-lg border border-red-400/40 bg-red-400/5 px-3 py-1.5 text-[9px] font-black tracking-[0.12em] text-red-300">CLOSE</button>}</div><div className="mt-6 grid grid-cols-3 gap-4">{[["LINK","↗"],["IMAGE","▧"],["VIDEO","▶"]].map(([x,i])=><div key={x} className="rounded-2xl border border-green-400/20 bg-green-400/5 p-5"><div className="text-3xl text-green-400">{i}</div><p className="mt-3 text-sm font-black tracking-[0.15em] text-green-300">{x} CHECKER</p></div>)}</div>{(ultimateRunning||ultimateComplete)&&(
+          <div className="mt-8 overflow-hidden rounded-[28px] border border-green-500/50 bg-black/80 shadow-[0_0_35px_rgba(0,255,80,0.1)]">
+            <div className="flex items-center justify-between border-b border-green-500/30 px-6 py-4">
+              <div className="flex items-center gap-3">
+                <div className={`h-2 w-2 rounded-full ${ultimateRunning?"animate-pulse bg-green-400 shadow-[0_0_12px_rgba(0,255,80,0.9)]":"bg-green-500"}`} />
+                <h2 className="text-sm font-black tracking-[0.2em] text-green-300">LIVE ULTIMATE CHECK</h2>
+              </div>
+              <span className="text-[10px] font-bold tracking-[0.18em] text-green-500/70">
+                {ultimateRunning?"SCANNING...":ultimateComplete?"COMPLETE":""}
+              </span>
+            </div>
+
+            <div className={`overflow-hidden px-5 py-5 font-mono text-[11px] leading-5 sm:text-xs ${ultimateComplete?"min-h-[250px]":"h-[150px]"}`}>
+              {!ultimateComplete&&ultimateLiveLines.map((message,index)=>(
+                <div key={`${index}-${message}`} className={`${getUltimateLineClass(message)} break-words`}>
+                  {message}
+                </div>
+              ))}
+
+              {ultimateRunning&&(
+                <div className="mt-1 text-green-300">█ SCANNING...</div>
+              )}
+
+              {ultimateComplete&&(
+                <div className="space-y-3">
+                  <div className="mb-4 text-[11px] sm:text-sm font-black tracking-[0.15em] text-green-300 whitespace-nowrap">
+                    ╔════════════════════════════════════╗
+                    <br />
+                    ║ &nbsp; SCAN COMPLETE
+                    <br />
+                    ╚════════════════════════════════════╝
+                  </div>
+
+                  {ultimateFinalSummary.map((message,index)=>{
+                    if(message==="SCAN COMPLETE") return null;
+
+                    if(/^(LINK|IMAGE|VIDEO) CHECKED \d+ \| MANUAL \d+ \| DEFECTS \d+$/.test(message)) return null;
+
+                    if(message.startsWith("Checker:")){
+                      return (
+                        <div key={`meta-${index}-${message}`} className="text-green-300">
+                          <span className="text-green-500">CHECKER</span>{"  "}{message.replace("Checker:","").trim()}
+                        </div>
+                      );
+                    }
+
+                    if(message.startsWith("Page:")){
+                      return (
+                        <div key={`meta-${index}-${message}`} className="break-all text-green-300">
+                          <span className="text-green-500">PAGE</span>{"     "}{message.replace("Page:","").trim()}
+                        </div>
+                      );
+                    }
+
+                    return null;
+                  })}
+
+                  <div className="space-y-2">
+                    {(["LINK","IMAGE","VIDEO"] as const).map(category=>{
+                      const summary=ultimateSummary[category];
+                      return (
+                        <div key={category} className="rounded-xl border border-green-500/20 bg-green-500/5 px-3 py-2.5">
+                          <div className="mb-2 flex items-center justify-between">
+                            <span className="font-black tracking-[0.16em] text-green-300">{category}</span>
+                            <span className="text-[9px] font-bold tracking-[0.14em] text-green-500/70">ULTIMATE SCAN</span>
+                          </div>
+                          <div className="grid grid-cols-3 gap-2">
+                            <div className="flex items-center justify-between rounded-lg border border-green-500/20 bg-black/40 px-2.5 py-1.5">
+                              <span className="flex items-center gap-1.5 text-[10px] font-black tracking-[0.08em] text-green-400">
+                                <span className="h-1.5 w-1.5 rounded-full bg-green-400 shadow-[0_0_8px_rgba(0,255,80,0.9)]" />CHECKED
+                              </span>
+                              <span className="font-black text-white">{summary.checked}</span>
+                            </div>
+                            <div className="flex items-center justify-between rounded-lg border border-yellow-500/20 bg-black/40 px-2.5 py-1.5">
+                              <span className="flex items-center gap-1.5 text-[10px] font-black tracking-[0.08em] text-yellow-400">
+                                <span className="h-1.5 w-1.5 rounded-full bg-yellow-400 shadow-[0_0_8px_rgba(255,210,0,0.75)]" />MANUAL
+                              </span>
+                              <span className="font-black text-white">{summary.manual}</span>
+                            </div>
+                            <div className="flex items-center justify-between rounded-lg border border-red-500/20 bg-black/40 px-2.5 py-1.5">
+                              <span className="flex items-center gap-1.5 text-[10px] font-black tracking-[0.08em] text-red-400">
+                                <span className="h-1.5 w-1.5 rounded-full bg-red-400 shadow-[0_0_8px_rgba(255,60,80,0.75)]" />DEFECTS
+                              </span>
+                              <span className="font-black text-white">{summary.defects}</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="border-t border-green-500/20 pt-3">
+                    <div className="text-sm font-black tracking-[0.12em] text-red-300">
+                      TOTAL CONFIRMED DEFECTS {ultimateSummary.LINK.defects+ultimateSummary.IMAGE.defects+ultimateSummary.VIDEO.defects}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        <button disabled={isMobileDevice||ultimateRunning||running} onClick={runUltimate} className="mt-5 w-full rounded-2xl bg-gradient-to-r from-green-400 to-emerald-300 px-6 py-5 text-sm font-black tracking-[0.15em] text-black shadow-[0_0_35px_rgba(0,255,80,.28)] disabled:opacity-40">{ultimateRunning?"RUNNING ULTIMATE CHECK...":"RUN ULTIMATE CHECK"}</button>
+{checkerReports.length>0&&<div className="mt-5 rounded-2xl border border-green-400/20 bg-black/50 p-4 sm:p-5">
+  <div className="mb-4 flex items-center justify-between">
+    <span className="text-[10px] font-black tracking-[0.18em] text-green-400">RESULTS</span>
+    <span className="text-[9px] font-black tracking-[0.14em] text-green-400/50">{checkerReports.length} REPORTS</span>
+  </div>
+
+  <div className="grid gap-3 lg:grid-cols-3">
+    {(["LINK","IMAGE","VIDEO"] as const).map(category=>{
+      const summary=ultimateSummary[category];
+      return <div key={category} className="rounded-xl border border-green-500/30 bg-[#031009] p-3 sm:p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <span className="text-sm font-black tracking-[0.16em] text-green-300">{category}</span>
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          <div className="rounded-lg border border-green-500/30 bg-black/50 px-2 py-3 text-center">
+            <div className="text-[9px] font-black tracking-[0.12em] text-green-500">CHECKED</div>
+            <div className="mt-1 text-2xl font-black text-white sm:text-3xl">{summary.checked}</div>
+          </div>
+          <div className="rounded-lg border border-red-500/30 bg-black/50 px-2 py-3 text-center">
+            <div className="text-[9px] font-black tracking-[0.12em] text-red-400">DEFECTS</div>
+            <div className="mt-1 text-2xl font-black text-white sm:text-3xl">{summary.defects}</div>
+          </div>
+        </div>
+      </div>;
+    })}
+  </div>
+
+  <button onClick={openInlineReport} className="mt-4 w-full rounded-xl border border-green-400/40 bg-green-400/5 px-4 py-3 text-xs font-black tracking-[0.12em] text-green-300">VIEW DETAILED REPORT</button>
+  <button onClick={()=>void saveAllCheckerReports()} className="mt-3 w-full rounded-xl bg-green-400 px-5 py-4 text-xs font-black tracking-[0.14em] text-black shadow-[0_0_25px_rgba(0,255,80,.2)]">SAVE TO SIGNALS</button>
+
+  {inlineReportOpen&&<div className="mt-5 overflow-hidden rounded-[22px] border border-green-400/60 bg-black">
+    <div className="grid grid-cols-3 gap-2 border-b border-green-400/20 p-2">
+      {(["LINK","IMAGE","VIDEO"] as const).map(category=>{
+        const available=!!inlineReports[category];
+        const selected=inlineReportCategory===category&&available;
+        return <button key={category} type="button" disabled={!available} onClick={()=>available&&setInlineReportCategory(category)} className={`rounded-xl px-3 py-3 text-[10px] font-black tracking-[0.16em] transition ${selected?"bg-gradient-to-r from-green-400 to-emerald-300 text-black":"text-green-100/70 hover:bg-green-400/10 hover:text-green-300"} ${!available?"cursor-default opacity-35":""}`}>{category}</button>;
+      })}
+    </div>
+    <div className="h-72 max-h-72 min-h-0 overflow-auto overscroll-contain bg-[#010603] p-5 font-mono text-[11px] leading-5 text-green-100 sm:text-xs">
+      {inlineReportLoading?<div className="animate-pulse text-green-400">Loading report...</div>:inlineReportError?<div className="text-red-300">{inlineReportError}</div>:inlineReports[inlineReportCategory]?<pre className="whitespace-pre-wrap break-words">{inlineReports[inlineReportCategory]?.content}</pre>:<div className="text-green-100/30">No reports are available.</div>}
+    </div>
+  </div>}
+
+  {inlineReportOpen&&<button onClick={saveCheckerReports} className="mt-4 w-full rounded-xl bg-green-400 px-5 py-4 text-xs font-black tracking-[0.14em] text-black shadow-[0_0_25px_rgba(0,255,80,.2)]">SAVE TO SIGNALS</button>}
+</div>}
+</section>}
+
+        {featureVisible("signals") && <section className="mt-6 rounded-[28px] border border-cyan-400/30 bg-black/70 p-5 sm:p-7"><div className="flex flex-col gap-4 border-b border-cyan-400/20 pb-5 sm:flex-row sm:items-start sm:justify-between"><div className="min-w-0"><p className="text-xs font-black tracking-[0.22em] text-cyan-400">WORKSPACE SIGNALS</p><div className="mt-2 flex items-center gap-3"><h2 className="text-3xl font-black">SIGNAL</h2>{visibleSignals.length>0&&<span className="rounded-lg border border-cyan-400/20 bg-cyan-400/5 px-2 py-1 text-[9px] font-black tracking-[0.12em] text-cyan-300">{visibleSignals.length}</span>}</div><p className="mt-2 text-body text-cyan-100/45">Signals captured from defect checks for website investigations.</p>{incognito&&<p className="mt-3 text-[10px] font-black tracking-[0.16em] text-red-300">INCOGNITO MODE • SIGNALS WILL NOT BE SAVED</p>}</div></div>{visibleSignals.length>0&&<div className="mt-5 max-h-96 min-h-0 overflow-auto overscroll-contain rounded-xl bg-black/50 p-3"><div className="space-y-3">{visibleSignals.map(a=><div key={a.id} className="rounded-xl border border-cyan-400/20 bg-cyan-400/5 p-4"><div className="flex items-start justify-between gap-3"><span className="break-all font-mono text-xs text-white/80">{a.name}</span><span className="shrink-0 text-[9px] font-black text-cyan-400/70">{a.kind}</span></div><div className="mt-4 grid gap-2"><button onClick={()=>openSignalViewer(a)} className="w-full rounded-lg border border-cyan-400/50 bg-cyan-400/10 px-3 py-2 text-[10px] font-black tracking-[0.12em] text-cyan-300">VIEW</button><button onClick={()=>uploadSignalToSource(a)} className="w-full rounded-lg bg-cyan-400 px-3 py-2 text-[10px] font-black tracking-[0.12em] text-black">UPLOAD TO SOURCE</button><div className="grid grid-cols-2 gap-2"><button onClick={()=>downloadSignal(a)} className="rounded-lg border border-cyan-400/40 bg-cyan-400/5 px-3 py-2 text-[10px] font-black tracking-[0.12em] text-cyan-300">DOWNLOAD</button><button onClick={()=>deleteSignal(a.id)} className="rounded-lg border border-red-400/40 bg-red-400/5 px-3 py-2 text-[10px] font-black tracking-[0.12em] text-red-300">DELETE</button></div></div></div>)}</div></div>}</section>}
+
+        {featureVisible("extractors") && <section className={`mt-6 rounded-[28px] border border-cyan-400/30 bg-black/70 p-5 sm:p-7 ${isMobileDevice ? "opacity-40" : ""}`}> 
+          <div className="flex flex-col gap-3 border-b border-cyan-400/20 pb-5 sm:flex-row sm:items-start sm:justify-between">
+            <div><p className="text-xs font-black tracking-[0.22em] text-cyan-400">WORKSPACE EXTRACTORS</p><h2 className="mt-2 text-3xl font-black">EXTRACTION</h2><p className="mt-2 text-body text-cyan-100/45">Select a platform-based extractor, run it on the current page, and merge the output into a master JSON to upload to Source.</p>{isMobileDevice&&<p className="mt-3 text-[10px] font-black tracking-[0.16em] text-red-400">DESKTOP REQUIRED • EXTRACTION DISABLED ON MOBILE</p>}{incognito&&<p className="mt-3 text-[10px] font-black tracking-[0.16em] text-red-300">INCOGNITO MODE • EXTRACTED FILES WILL NOT BE SAVED</p>}</div>{extractorHasRun&&!running&&<button type="button" onClick={()=>resetExtractorToIdle("READY")} className="self-start rounded-lg border border-red-400/40 bg-red-400/5 px-3 py-1.5 text-[9px] font-black tracking-[0.12em] text-red-300">CLOSE</button>}
+          </div>
+          <div className="mt-5 grid gap-3 sm:grid-cols-2">
+            <select disabled={isMobileDevice} value={selectedExtractor} onChange={e=>setSelectedExtractor(e.target.value)} className="w-full rounded-xl border border-cyan-400/30 bg-black px-4 py-4 text-sm text-white outline-none"><option value="">Select extractor...</option>{visibleTierExtractors.map(e=><option key={e.id} value={e.id}>{e.name}</option>)}</select>
+            <button disabled={isMobileDevice||running||mergeRunning||ultimateRunning} onClick={runExtractor} className="rounded-xl bg-gradient-to-r from-cyan-400 to-sky-300 px-5 py-4 text-xs font-black tracking-[0.14em] text-black disabled:opacity-40">{running?"RUNNING...":"RUN EXTRACTOR"}</button>
+          </div>
+          {selectedExtractor&&<div className="mt-3 rounded-xl border border-cyan-400/15 bg-cyan-400/5 p-4 text-xs text-cyan-100/50">{visibleTierExtractors.find(e=>e.id===selectedExtractor)?.description}</div>}
+          {extractorHasRun&&<>
+            <div className="mt-5 rounded-2xl border border-cyan-400/15 bg-[#020a0d] p-4">
+              <div className="flex items-center justify-between"><p className="text-[10px] font-black tracking-[0.18em] text-cyan-400">LIVE EXTRACTION</p><span className="text-[9px] font-bold text-cyan-400/50">{running||mergeRunning?"RUNNING":"READY"}</span></div>
+              {extractorFinalSummary&&!running&&!mergeRunning ? extractorFinalSummary.failedRun ? <div className="mt-3 rounded-xl border border-cyan-400/15 bg-black/70 p-4 font-mono text-[10px] leading-5">
+                <div className="mb-4 text-[11px] sm:text-sm font-black tracking-[0.15em] text-red-400 whitespace-nowrap">╔════════════════════════════════════╗<br/>║ &nbsp; EXTRACTION FAILED<br/>╚════════════════════════════════════╝</div>
+                <div className="space-y-3">
+                  <div className="text-white"><span className="text-red-400">EXTRACTOR</span>{"  "}{extractorFinalSummary.extractor}</div>
+                  <div className="break-all text-white"><span className="text-red-400">SOURCE</span>{"     "}{extractorFinalSummary.source}</div>
+                  <div className="whitespace-pre-line text-red-400">{extractorFinalSummary.errorMessage}</div>
+                  <div className="border-t border-cyan-400/15 pt-3"><span className="font-black tracking-[0.16em] text-cyan-400">STATUS:</span>{" "}<span className="font-black text-red-400">EXTRACTION FAILED</span></div>
+                </div>
+              </div> : <div className="mt-3 rounded-xl bg-black/70 p-4 font-mono text-[10px] leading-5">
+                <div className="mb-4 text-sm font-black tracking-[0.15em] text-cyan-300">╔════════════════════════════════════╗<br/>║ &nbsp; EXTRACTION COMPLETE<br/>╚════════════════════════════════════╝</div>
+                <div className="space-y-3">
+                  <div className="text-cyan-100/80"><span className="text-cyan-400">EXTRACTOR</span>{"  "}{extractorFinalSummary.extractor}</div>
+                  <div className="break-all text-cyan-100/80"><span className="text-cyan-400">SOURCE</span>{"     "}{extractorFinalSummary.source}</div>
+                  <div className="rounded-xl border border-cyan-400/15 bg-cyan-400/5 px-3 py-2.5">
+                    <div className="mb-2 flex items-center justify-between"><span className="font-black tracking-[0.16em] text-cyan-300">ARTICLES EXTRACTOR</span><span className="text-[9px] font-bold tracking-[0.14em] text-cyan-400/70">EXTRACTION</span></div>
+                    <div className="grid grid-cols-3 gap-2">
+                      <div style={{borderColor:"rgba(34,211,238,.20)"}} className="flex items-center justify-between rounded-lg border bg-cyan-400/5 px-2.5 py-1.5"><span className="flex items-center gap-1.5 text-[10px] font-black tracking-[0.08em] text-cyan-400"><span className="h-1.5 w-1.5 rounded-full bg-cyan-400"/>DISCOVERED</span><span style={{color:"rgb(103,232,249)"}} className="font-black">{extractorFinalSummary.discovered}</span></div>
+                      <div className="flex items-center justify-between rounded-lg border border-green-500/20 bg-green-400/5 px-2.5 py-1.5"><span className="flex items-center gap-1.5 text-[10px] font-black tracking-[0.08em] text-green-400"><span className="h-1.5 w-1.5 rounded-full bg-green-400"/>SUCCESSFUL</span><span className="font-black text-green-400">{extractorFinalSummary.successful}</span></div>
+                      <div className="flex items-center justify-between rounded-lg border border-red-500/20 bg-red-400/5 px-2.5 py-1.5"><span className="flex items-center gap-1.5 text-[10px] font-black tracking-[0.08em] text-red-400"><span className="h-1.5 w-1.5 rounded-full bg-red-400"/>FAILED</span><span className="font-black text-red-400">{extractorFinalSummary.failed}</span></div>
+                    </div>
+                  </div>
+                  <div className="rounded-xl border border-cyan-400/15 bg-cyan-400/5 px-3 py-2.5">
+                    <div className="mb-2 flex items-center justify-between"><span className="font-black tracking-[0.16em] text-cyan-300">FILES GENERATED</span><span className="text-[9px] font-bold tracking-[0.14em] text-cyan-400/70">JSON</span></div>
+                    <div className="flex items-center justify-between rounded-lg border border-green-500/20 bg-green-400/5 px-2.5 py-1.5"><span className="flex items-center gap-1.5 text-[10px] font-black tracking-[0.08em] text-green-400"><span className="h-1.5 w-1.5 rounded-full bg-green-400"/>GENERATED</span><span className="font-black text-green-400">{extractorFinalSummary.generated}</span></div>
+                  </div>
+                  {extractorFinalSummary.failures.length>0&&<div className="rounded-xl border border-red-500/20 bg-red-400/5 px-3 py-2.5">
+                    <div className="mb-2 flex items-center justify-between"><span className="font-black tracking-[0.16em] text-red-300">FAILED EXTRACTION</span><span className="text-[9px] font-bold tracking-[0.14em] text-red-400/70">{extractorFinalSummary.failures.length} FAILED</span></div>
+                    <div style={{height:"9rem",maxHeight:"9rem",minHeight:0,overflowY:"auto"}} className="min-h-0 overflow-x-hidden overscroll-contain rounded-lg bg-black/40 p-2">{extractorFinalSummary.failures.map((failure,index)=><div key={`${failure.url}-${index}`} className="border-b border-red-400/10 py-1.5 last:border-0"><div className="break-all text-red-200/80">{failure.url}</div><div className="mt-0.5 text-red-300/60">{failure.error}</div></div>)}</div>
+                  </div>}
+                  <div className="border-t border-cyan-400/15 pt-3"><span className="font-black tracking-[0.16em] text-cyan-300">STATUS:</span>{" "}<span className="font-black text-cyan-100/90">EXTRACTION COMPLETE</span></div>
+                </div>
+              </div> : <div className="mt-3 h-28 max-h-28 min-h-0 overflow-hidden rounded-xl bg-black/70 p-3 font-mono text-[10px] leading-5 text-cyan-100/70">{extractorLiveLines.slice(-3).map((line,i)=><div key={`${i}-${line}`} className="break-words">{line}</div>)}{(running||mergeRunning)&&<div className="text-cyan-300">█ WORKING...</div>}</div>}
+            </div>
+            <div className="mt-5 rounded-2xl border border-cyan-400/15 bg-[#020a0d] p-4 overflow-hidden">
+              <div className="flex items-center justify-between gap-3"><p className="text-[10px] font-black tracking-[0.18em] text-cyan-400">EXTRACTED FILE</p><div className="flex items-center gap-3"><span className="text-[9px] font-bold text-cyan-400/50">{extractedFiles.filter(a=>a.kind==="JSON").length} {extractedFiles.filter(a=>a.kind==="JSON").length===1?"JSON FILE":"JSON FILES"}</span><button type="button" disabled={running||mergeRunning||!extractedFiles.some(a=>a.kind==="JSON")} onClick={()=>{setExtractedFiles(prev=>[...prev.filter(a=>a.kind!=="JSON"), ...prev.filter(a=>a.kind==="MASTER")]); resetExtractorToIdle("EXTRACTED FILES CLEARED");}} className="rounded-lg border border-red-400/40 bg-red-400/5 px-3 py-1.5 text-[9px] font-black tracking-[0.12em] text-red-300 disabled:cursor-not-allowed disabled:opacity-35">CLEAR</button></div></div>
+              <div className="mt-3 max-h-72 min-h-0 overflow-auto overscroll-contain rounded-xl bg-black/50 p-3"><div className="space-y-2">{extractedFiles.filter(a=>a.kind==="JSON").map(a=><div key={a.id} className="flex items-center justify-between gap-3 rounded-xl border border-cyan-400/10 bg-black/50 px-3 py-3"><span className="min-w-0 break-all font-mono text-xs text-cyan-100/70">{a.name}</span><button type="button" disabled={running||mergeRunning} onClick={()=>setDeletePrompt({kind:"extracted",id:a.id})} className="shrink-0 rounded-lg border border-red-400/40 bg-red-400/5 px-3 py-1.5 text-[9px] font-black tracking-[0.12em] text-red-300 disabled:cursor-not-allowed disabled:opacity-35">DELETE</button></div>)}{!extractedFiles.some(a=>a.kind==="JSON")&&<p className="text-xs text-cyan-100/30">No extracted JSON files yet.</p>}</div></div>
+            </div>
+            <div className="mt-5 grid gap-3 sm:grid-cols-2">
+              <button disabled={isMobileDevice||running||mergeRunning||(!extractedFiles.some(a=>a.kind==="MASTER")&&extractedFiles.filter(a=>a.kind==="JSON").length!==1)} onClick={uploadAvailableToSource} className="rounded-xl bg-cyan-400 px-5 py-4 text-xs font-black tracking-[0.14em] text-black disabled:cursor-not-allowed disabled:opacity-35">UPLOAD TO SOURCE</button>
+              <button disabled={isMobileDevice||running||mergeRunning||extractedFiles.filter(a=>a.kind==="JSON").length<=1} onClick={mergeExtractors} className="rounded-xl border border-cyan-400/40 bg-cyan-400/5 px-5 py-4 text-xs font-black tracking-[0.14em] text-cyan-300 disabled:cursor-not-allowed disabled:opacity-35">{mergeRunning?"MERGING...":"MERGE JSON"}</button>
+            </div>
+            {extractedFiles.some(a=>a.kind==="MASTER")&&<div className="mt-5 rounded-2xl border border-cyan-400/25 bg-cyan-400/5 p-4"><div className="flex items-center justify-between"><p className="text-[10px] font-black tracking-[0.18em] text-cyan-400">MERGED JSON</p><div className="flex items-center gap-3"><span className="text-[9px] font-bold text-cyan-400/50">MASTER JSON</span><button type="button" disabled={running||mergeRunning} onClick={()=>{setExtractedFiles(prev=>prev.filter(a=>a.kind!=="MASTER"));setStatus("MASTER JSON DISCARDED");}} className="rounded-lg border border-red-400/40 bg-red-400/5 px-3 py-1.5 text-[9px] font-black tracking-[0.12em] text-red-300 disabled:cursor-not-allowed disabled:opacity-35">DISCARD</button></div></div><div className="mt-3 rounded-xl border border-cyan-400/10 bg-black/50 px-3 py-3 font-mono text-xs text-cyan-100/70">{extractedFiles.find(a=>a.kind==="MASTER")?.name || "MASTER JSON"}</div></div>}
+          </>}
+        </section>}
+
+        {featureVisible("evidence") && <section className="mt-6 rounded-[28px] border border-cyan-400/30 bg-black/70 p-5 sm:p-7">
+          <div className="flex flex-col gap-3 border-b border-cyan-400/20 pb-5 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-xs font-black tracking-[0.22em] text-cyan-400">WORKSPACE EVIDENCES</p>
+              <h2 className="mt-2 text-3xl font-black">EVIDENCE</h2>
+              <p className="mt-2 text-body text-cyan-100/45">Screencast, screenshot and log attachments captured from the investigation browser for bug analysis and documentation.</p>
+              {incognito&&<p className="mt-3 text-[10px] font-black tracking-[0.16em] text-red-300">INCOGNITO MODE • EVIDENCE WILL NOT BE SAVED</p>}
+            </div>
+          </div>
+
+          <div className="mt-5 grid min-h-0 gap-3">
+            {(["IMAGE","VIDEO","LOG"] as const).map(category=>{
+              const files=evidenceFiles.filter(file=>file.category===category);
+              const label=category==="IMAGE"?"SCREENSHOT":category==="VIDEO"?"SCREENCAST":"LOG";
+              const fileTypes=category==="IMAGE"?".jpg .jpeg .png":category==="VIDEO"?".mp4":".log .chls .chlsj .chlz";
+              const accept=category==="IMAGE"?".jpg,.jpeg,.png":category==="VIDEO"?".mp4":".log,.chls,.chlsj,.chlz";
+
+              return <div key={category} className="min-h-0 rounded-2xl border border-cyan-400/20 bg-cyan-400/5 p-4">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-[10px] font-black tracking-[0.18em] text-cyan-300">{label}</p>
+                  <span className="text-[9px] font-bold text-cyan-400/50">{files.length}</span>
+                </div>
+
+                {files.length ? (
+                  <div className="mt-3 max-h-48 min-h-0 overflow-auto overscroll-contain rounded-xl bg-black/50 p-2">
+                    <div className="space-y-2">
+                      {files.map(file=>
+                        <div key={file.id} className="rounded-lg border border-cyan-400/10 bg-black/50 px-2.5 py-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="min-w-0 break-all font-mono text-[10px] text-cyan-100/70">{file.name}</span>
+                            <div className="flex shrink-0 items-center gap-2">
+                              <button type="button" onClick={()=>downloadEvidenceFile(file)} className="rounded-lg border border-cyan-400/40 bg-cyan-400/5 px-2 py-1 text-[9px] font-black tracking-[0.1em] text-cyan-300">DOWNLOAD</button>
+                              <button type="button" onClick={()=>deleteEvidenceFile(file.id)} className="rounded-lg border border-red-400/40 bg-red-400/5 px-2 py-1 text-[9px] font-black tracking-[0.1em] text-red-300">DELETE</button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="mt-3 px-1 py-1 text-[10px] text-cyan-100/25">{fileTypes}</p>
+                )}
+
+                <label className="mt-3 block cursor-pointer rounded-xl border border-cyan-400/40 bg-black/40 px-3 py-2.5 text-center text-[9px] font-black tracking-[0.14em] text-cyan-300">
+                  UPLOAD {label}
+                  <input type="file" multiple accept={accept} className="hidden" onChange={e=>{void uploadEvidenceFiles(category,e)}} />
+                </label>
+              </div>;
+            })}
+          </div>
+        </section>}
+
+        {featureVisible("sources") && <section className="mx-auto mt-6 max-w-5xl rounded-[28px] border border-cyan-400/30 bg-black/70 p-5 sm:p-7">
+          <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"><div><p className="text-xs font-black tracking-[0.22em] text-cyan-400">WORKSPACE CONTEXT</p><h1 className="mt-2 text-3xl font-black">PROJECT CONTROL</h1>{incognito&&<p className="mt-3 text-[10px] font-black tracking-[0.16em] text-red-300">INCOGNITO MODE • SOURCES WILL NOT BE SAVED</p>}</div></div>
+          <div className="grid gap-4">
+            <div className="rounded-2xl border border-cyan-400/30 bg-cyan-400/5 p-5"><p className="text-xs font-black tracking-[0.22em] text-cyan-400">SOURCE HIERARCHY</p><h2 className="mt-2 text-3xl font-black">SOURCE</h2><p className="mt-3 text-body leading-5 text-cyan-100/50">Trusted project sources used to establish scope, expected behavior, known issues, test requirements, and other investigation facts.</p><div className="mt-4 max-h-72 overflow-auto rounded-xl border border-cyan-400/15 bg-black/50 p-3">{displayedSources.length?displayedSources.map(f=><div key={f.id} className="flex items-center justify-between gap-3 border-b border-cyan-400/10 py-2 last:border-0"><span className="min-w-0 break-all font-mono text-[10px] text-cyan-100/70">{f.name}</span>{f.id!=="platform-project-instruction"&&<div className="flex shrink-0 items-center gap-2"><button type="button" onClick={()=>renameSource(f.id,f.name)} className="rounded-lg border border-cyan-400/40 bg-cyan-400/5 px-3 py-1.5 text-[9px] font-black tracking-[0.12em] text-cyan-300">RENAME</button><button type="button" onClick={()=>deleteSource(f.id)} className="rounded-lg border border-red-400/40 bg-red-400/5 px-3 py-1.5 text-[9px] font-black tracking-[0.12em] text-red-300">DELETE</button></div>}</div>):<span className="text-[10px] text-cyan-100/25">No source hierarchy files loaded.</span>}</div><label className="mt-3 block cursor-pointer rounded-xl border border-cyan-400/40 bg-black/40 px-4 py-3 text-center text-[10px] font-black tracking-[0.14em] text-cyan-300">UPLOAD TO SOURCE<input type="file" multiple className="hidden" onChange={uploadSourceFiles}/></label></div>
+
+            <div className="rounded-2xl border border-cyan-400/30 bg-cyan-400/5 p-5"><p className="text-xs font-black tracking-[0.22em] text-cyan-400">PROJECT INSTRUCTION</p><h2 className="mt-2 text-3xl font-black">INSTRUCTION</h2><p className="mt-3 text-body leading-5 text-cyan-100/50">Rules and requirements that define the context, methodology, source handling, and investigation process for a project.</p><div className="mt-4 rounded-xl border border-cyan-400/15 bg-black/50 p-3 font-mono text-[10px] text-cyan-100/70">Platform-Based Project Instruction</div>{instructionError&&<p className="mt-2 text-[10px] font-bold text-red-300">{instructionError}</p>}{instructions[0]?.content&&<div className="mt-3 h-72 max-h-72 min-h-0 overflow-auto overscroll-contain rounded-xl border border-cyan-400/15 bg-black/80 p-4"><pre className="whitespace-pre-wrap break-words select-text font-mono text-[10px] leading-5 text-cyan-100/75">{instructions[0].content}</pre></div>}</div>
+          </div>
+        </section>}
+
+        <div className="mt-6 flex flex-col gap-3 rounded-2xl border border-cyan-400/15 bg-black/50 p-4 sm:flex-row sm:items-center sm:justify-between"><div><span className="font-mono text-[10px] font-black tracking-[0.12em] text-cyan-300/70">STATUS: {status}</span>{confirmClear&&<p className="mt-2 text-[10px] font-bold text-red-300">CLICK CLEAR AGAIN TO CONFIRM WORKSPACE CLEAR.</p>}</div><button onClick={clearWorkspace} className="rounded-xl border border-red-400/30 px-4 py-3 text-xs font-black tracking-[0.12em] text-red-300">{confirmClear?"CONFIRM CLEAR":"CLEAR WORKSPACE"}</button></div>
+        <footer className="mt-10 border-t border-cyan-400/20 pt-6 text-center text-[10px] font-black tracking-[0.2em] text-cyan-400/40">v1124 BUG WORKSTATION</footer>
+
+
+      </div>
+    </main>
+    </>
+  );
+}
+
+export default function WorkstationPage(){ return <AuthGate returnTo="/workstation"><WorkstationPageContent /></AuthGate>; }

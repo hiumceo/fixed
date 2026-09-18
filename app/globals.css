@@ -1,0 +1,84 @@
+@import "tailwindcss";
+
+/* Hauslan global font family */
+@font-face {
+  font-family: "Hauslan";
+  src: url("/fonts/hauslan-regular.otf") format("opentype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Hauslan";
+  src: url("/fonts/hauslan-bold.otf") format("opentype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Hauslan";
+  src: url("/fonts/hauslan-black.otf") format("opentype");
+  font-weight: 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: #171717;
+
+  /* Universal typography scale */
+  --font-size-display: npm.cmd run build20px;
+  --font-size-primary: 16px;
+  --font-size-section: 14px;
+  --font-size-body: 14px;
+  --font-size-label: 10px;
+  --font-size-micro: 8px;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: "Hauslan", sans-serif;
+  --font-mono: var(--font-geist-mono);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "Hauslan", sans-serif;
+}
+
+/* Universal typography utilities */
+.text-display {
+  font-size: var(--font-size-display);
+}
+
+.text-primary {
+  font-size: var(--font-size-primary);
+}
+
+.text-section {
+  font-size: var(--font-size-section);
+}
+
+.text-body {
+  font-size: var(--font-size-body);
+}
+
+.text-label {
+  font-size: var(--font-size-label);
+}
+
+.text-micro {
+  font-size: var(--font-size-micro);
+}

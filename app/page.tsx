@@ -1,0 +1,10 @@
+"use client";
+import { useEffect, useState } from "react";
+import V1124Auth from "@/components_V1124Auth";
+export default function AuthHome(){
+ const [user,setUser]=useState<{username:string;role?:"USER"|"ADMIN"}|null>(null); const [loading,setLoading]=useState(true);
+ useEffect(()=>{fetch("/api/auth",{cache:"no-store"}).then(r=>r.json()).then(d=>setUser(d?.user||null)).catch(()=>setUser(null)).finally(()=>setLoading(false));},[]);
+ if(loading)return <main className="min-h-screen bg-[#030505]"/>;
+ if(!user)return <V1124Auth returnTo="/"/>;
+ return <main className="min-h-screen bg-[#030505] px-5 py-6 text-white"><div className="mx-auto flex min-h-[calc(100vh-3rem)] max-w-md items-center justify-center"><section className="w-full rounded-[28px] border border-white/10 bg-black/80 p-6 text-center sm:p-8"><img src="/v1124-auth-logo.png" alt="v1124 AUTH" className="mx-auto mb-5 max-h-20 w-auto"/><p className="text-xs font-black tracking-[0.18em] text-white/55">SECURED ACCESS. ONE ACCOUNT.</p><p className="mt-6 text-sm text-white/70">SIGNED IN AS <strong className="text-white">{user.username}</strong></p><div className="mt-6 grid gap-3"><button onClick={()=>window.location.href="/checker"} className="rounded-xl bg-green-400 px-5 py-4 text-xs font-black tracking-[0.18em] text-black">CHECKER</button><button onClick={()=>window.location.href="/workstation"} className="rounded-xl bg-cyan-400 px-5 py-4 text-xs font-black tracking-[0.18em] text-black">WORKSTATION</button>{user.role === "ADMIN" && <button onClick={()=>window.location.href="/admin"} className="rounded-xl border border-white/25 bg-white px-5 py-4 text-xs font-black tracking-[0.18em] text-black">ADMIN PANEL</button>}<button onClick={async()=>{await fetch("/api/auth",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({action:"signout"})});window.location.reload();}} className="mt-2 rounded-xl border border-white/10 bg-black px-5 py-3 text-[10px] font-black tracking-[0.16em] text-white/50">SIGN OUT</button></div></section></div></main>;
+}
