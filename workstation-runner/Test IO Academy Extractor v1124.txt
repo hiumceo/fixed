@@ -1,0 +1,750 @@
+(async () => {
+  const START_URL = "https://academy.test.io/en/";
+  const OUTPUT_PREFIX = "TestIO-Academy";
+
+  console.clear();
+  console.log("TEST IO ACADEMY — v1124-BATCH");
+  console.log("Starting from:", START_URL);
+
+  // ============================================================
+  // HELPERS
+  // ============================================================
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  function cleanText(text) {
+    return (text || "")
+      .replace(/\u00a0/g, " ")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n[ \t]+/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  function getArticleId(url) {
+    const m = url.match(/\/en\/articles\/(\d+)(?:-|\/|$)/i);
+    return m ? m[1] : null;
+  }
+
+  function normalizeArticleURL(rawUrl) {
+    try {
+      const u = new URL(rawUrl, START_URL);
+
+      if (u.origin !== "https://academy.test.io") return null;
+
+      let pathname = decodeURIComponent(u.pathname);
+
+      const m = pathname.match(
+        /^\/en\/articles\/(\d+)(?:-([^/?#]+))?/i
+      );
+
+      if (!m) return null;
+
+      const id = m[1];
+      let slug = m[2] || "";
+
+      slug = slug
+        .replace(/["'<>]+$/g, "")
+        .replace(/[^a-zA-Z0-9_-]+$/g, "");
+
+      return `https://academy.test.io/en/articles/${id}-${slug}`;
+    } catch {
+      return null;
+    }
+  }
+
+  function addCanonicalArticle(articleMap, rawUrl) {
+    const url = normalizeArticleURL(rawUrl);
+    if (!url) return;
+
+    const id = getArticleId(url);
+    if (!id) return;
+
+    if (!articleMap.has(id)) {
+      articleMap.set(id, url);
+    }
+  }
+
+  // ============================================================
+  // ARTICLE EXTRACTION
+  // ============================================================
+
+  function extractArticle(doc, url) {
+    const article = doc.querySelector("article");
+
+    if (!article) {
+      throw new Error("Article root not found");
+    }
+
+    // Actual Academy article title.
+    // Prefer page metadata over internal H1 section headings.
+    const title =
+      cleanText(
+        doc.querySelector(
+          "meta[property='og:title']"
+        )?.content
+      ) ||
+      cleanText(
+        doc.querySelector(
+          "meta[name='twitter:title']"
+        )?.content
+      ) ||
+      cleanText(
+        doc.title?.replace(
+          /\s*\|\s*Test IO Academy\s*$/i,
+          ""
+        )
+      ) ||
+      "Untitled Article";
+
+    const articleId =
+      getArticleId(url) || "unknown";
+
+    const headingBlocks =
+      Array.from(article.children)
+        .filter(el =>
+          el.matches(
+            ".intercom-interblocks-heading"
+          )
+        );
+
+    function getHeading(block) {
+      return cleanText(
+        block.querySelector(
+          "h1,h2,h3,h4,h5,h6"
+        )?.textContent
+      );
+    }
+
+    function isExcludedSection(el) {
+      if (
+        el.matches("section.related_articles") ||
+        el.closest(
+          "section.related_articles"
+        )
+      ) {
+        return true;
+      }
+
+      const heading = getHeading(el);
+
+      return (
+        heading === "Recommended articles"
+      );
+    }
+
+    // ------------------------------------------------------------
+    // LIST SERIALIZATION
+    // ------------------------------------------------------------
+
+    function getOwnItemText(li) {
+      const clone = li.cloneNode(true);
+
+      clone
+        .querySelectorAll(
+          ".intercom-interblocks-unordered-nested-list, " +
+          ".intercom-interblocks-ordered-nested-list"
+        )
+        .forEach(el => el.remove());
+
+      clone
+        .querySelectorAll("ul,ol")
+        .forEach(el => el.remove());
+
+      return cleanText(
+        clone.textContent
+      );
+    }
+
+    function serializeList(
+      block,
+      depth = 0
+    ) {
+      const lines = [];
+
+      const list =
+        block.matches("ul,ol")
+          ? block
+          : block.querySelector(
+              ":scope > ul, :scope > ol"
+            );
+
+      if (!list) return lines;
+
+      Array.from(list.children)
+        .filter(
+          el => el.tagName === "LI"
+        )
+        .forEach(li => {
+          const text =
+            getOwnItemText(li);
+
+          if (text) {
+            lines.push(
+              `${"  ".repeat(depth)}- ${text}`
+            );
+          }
+
+          Array.from(
+            li.children
+          ).forEach(child => {
+            if (
+              child.matches(
+                ".intercom-interblocks-unordered-nested-list, " +
+                ".intercom-interblocks-ordered-nested-list"
+              )
+            ) {
+              lines.push(
+                ...serializeList(
+                  child,
+                  depth + 1
+                )
+              );
+            }
+          });
+        });
+
+      return lines;
+    }
+
+    // ------------------------------------------------------------
+    // BLOCK SERIALIZATION
+    // ------------------------------------------------------------
+
+    function serializeBlock(el) {
+      if (
+        el.matches(
+          ".intercom-interblocks-unordered-nested-list, " +
+          ".intercom-interblocks-ordered-nested-list"
+        )
+      ) {
+        return serializeList(el);
+      }
+
+      if (
+        el.matches("ul,ol")
+      ) {
+        return serializeList(el);
+      }
+
+      if (
+        el.matches("img")
+      ) {
+        const src =
+          el.currentSrc ||
+          el.src ||
+          el.getAttribute("src");
+
+        return src
+          ? [`![Image](${src})`]
+          : [];
+      }
+
+      const images =
+        Array.from(
+          el.querySelectorAll("img")
+        );
+
+      const imageLines =
+        images
+          .map(img =>
+            img.currentSrc ||
+            img.src ||
+            img.getAttribute("src")
+          )
+          .filter(Boolean)
+          .map(
+            src =>
+              `![Image](${src})`
+          );
+
+      const text =
+        cleanText(
+          el.textContent
+        );
+
+      if (text) {
+        return [
+          ...text
+            .split(/\n+/)
+            .map(cleanText)
+            .filter(Boolean),
+          ...imageLines
+        ];
+      }
+
+      return imageLines;
+    }
+
+    // ------------------------------------------------------------
+    // BUILD SECTIONS
+    // ------------------------------------------------------------
+
+    const sections = [];
+
+    headingBlocks.forEach(
+      (headingBlock, index) => {
+        const heading =
+          getHeading(
+            headingBlock
+          );
+
+        const nextHeading =
+          headingBlocks[
+            index + 1
+          ];
+
+        const nodes = [];
+
+        let current =
+          headingBlock
+            .nextElementSibling;
+
+        while (
+          current &&
+          current !== nextHeading
+        ) {
+          nodes.push(current);
+          current =
+            current.nextElementSibling;
+        }
+
+        sections.push({
+          heading,
+          nodes
+        });
+      }
+    );
+
+    // ------------------------------------------------------------
+    // SERIALIZE CONTENT
+    // ------------------------------------------------------------
+
+    const contentLines = [];
+
+    for (
+      const section of sections
+    ) {
+      if (
+        section.heading ===
+        "Recommended articles"
+      ) {
+        continue;
+      }
+
+      if (
+        section.nodes.some(
+          node =>
+            node.matches(
+              "section.related_articles"
+            ) ||
+            node.closest(
+              "section.related_articles"
+            )
+        )
+      ) {
+        continue;
+      }
+
+      contentLines.push(
+        `# ${section.heading}`
+      );
+
+      contentLines.push("");
+
+      for (
+        const node of section.nodes
+      ) {
+        if (
+          node.matches(
+            "section.related_articles"
+          ) ||
+          node.closest(
+            "section.related_articles"
+          )
+        ) {
+          continue;
+        }
+
+        const lines =
+          serializeBlock(node);
+
+        if (lines.length) {
+          contentLines.push(
+            ...lines
+          );
+
+          contentLines.push("");
+        }
+      }
+    }
+
+    while (
+      contentLines.length &&
+      !contentLines[
+        contentLines.length - 1
+      ]
+    ) {
+      contentLines.pop();
+    }
+
+    return {
+      title,
+      articleId,
+      url,
+      content:
+        contentLines.join("\n")
+    };
+  }
+
+  // ============================================================
+  // FETCH ARTICLE
+  // ============================================================
+
+  async function fetchArticle(url) {
+    const response =
+      await fetch(url);
+
+    if (!response.ok) {
+      throw new Error(
+        `HTTP ${response.status}`
+      );
+    }
+
+    const html =
+      await response.text();
+
+    const parser =
+      new DOMParser();
+
+    const doc =
+      parser.parseFromString(
+        html,
+        "text/html"
+      );
+
+    return extractArticle(
+      doc,
+      url
+    );
+  }
+
+  // ============================================================
+  // DISCOVERY
+  // ============================================================
+
+  console.log(
+    "🔎 Discovering Academy articles..."
+  );
+
+  const articleMap =
+    new Map();
+
+  // ------------------------------------------------------------
+  // HOMEPAGE
+  // ------------------------------------------------------------
+
+  try {
+    const response =
+      await fetch(
+        START_URL
+      );
+
+    const html =
+      await response.text();
+
+    const parser =
+      new DOMParser();
+
+    const doc =
+      parser.parseFromString(
+        html,
+        "text/html"
+      );
+
+    doc
+      .querySelectorAll("a[href]")
+      .forEach(a => {
+        addCanonicalArticle(
+          articleMap,
+          a.href
+        );
+      });
+  } catch (e) {
+    console.warn(
+      "Homepage discovery failed:",
+      e
+    );
+  }
+
+  // ------------------------------------------------------------
+  // SITEMAP
+  // ------------------------------------------------------------
+
+  let sitemapCandidates = 0;
+
+  try {
+    const response =
+      await fetch(
+        "https://academy.test.io/sitemap.xml"
+      );
+
+    const sitemapText =
+      await response.text();
+
+    const parser =
+      new DOMParser();
+
+    const sitemapDoc =
+      parser.parseFromString(
+        sitemapText,
+        "application/xml"
+      );
+
+    const urls =
+      Array.from(
+        sitemapDoc.querySelectorAll(
+          "loc"
+        )
+      )
+        .map(
+          x =>
+            cleanText(
+              x.textContent
+            )
+        )
+        .filter(Boolean);
+
+    sitemapCandidates =
+      urls.length;
+
+    urls.forEach(url => {
+      addCanonicalArticle(
+        articleMap,
+        url
+      );
+    });
+
+    console.log(
+      "🗺️ Sitemap candidates:",
+      sitemapCandidates
+    );
+  } catch (e) {
+    console.warn(
+      "Sitemap discovery failed:",
+      e
+    );
+  }
+
+  // ------------------------------------------------------------
+  // DISCOVER LINKS FROM KNOWN ARTICLES
+  // ------------------------------------------------------------
+
+  const discoveryQueue =
+    Array.from(
+      articleMap.values()
+    );
+
+  for (
+    const url of discoveryQueue
+  ) {
+    try {
+      const response =
+        await fetch(url);
+
+      if (!response.ok) {
+        continue;
+      }
+
+      const html =
+        await response.text();
+
+      const parser =
+        new DOMParser();
+
+      const doc =
+        parser.parseFromString(
+          html,
+          "text/html"
+        );
+
+      doc
+        .querySelectorAll(
+          "a[href]"
+        )
+        .forEach(a => {
+          addCanonicalArticle(
+            articleMap,
+            a.href
+          );
+        });
+    } catch {
+      // Discovery failure does not
+      // prevent extraction.
+    }
+  }
+
+  const articleURLs =
+    Array.from(
+      articleMap.values()
+    );
+
+  console.log(
+    "📚 Unique article IDs:",
+    articleURLs.length
+  );
+
+  // ============================================================
+  // EXTRACT ARTICLES
+  // ============================================================
+
+  const files = [];
+  const failures = [];
+
+  for (
+    let i = 0;
+    i < articleURLs.length;
+    i++
+  ) {
+    const url =
+      articleURLs[i];
+
+    console.log(
+      `[${i + 1}/${articleURLs.length}]`,
+      url
+    );
+
+    try {
+      const article =
+        await fetchArticle(
+          url
+        );
+
+      const output = JSON.stringify(article, null, 2);
+
+      const safeTitle =
+        article.title
+          .replace(
+            /[<>:"/\\|?*]+/g,
+            ""
+          )
+          .replace(
+            /\s+/g,
+            "-"
+          )
+          .replace(
+            /-+/g,
+            "-"
+          )
+          .replace(
+            /^-|-$/g,
+            ""
+          )
+          .slice(
+            0,
+            100
+          ) ||
+        "Untitled";
+
+      const filename =
+        `${OUTPUT_PREFIX}-${safeTitle}-${article.articleId}.json`;
+
+      files.push({
+        name: filename,
+        data:
+          new TextEncoder()
+            .encode(output)
+      });
+
+      console.log(
+        "  ✅"
+      );
+    } catch (e) {
+      failures.push({
+        url,
+        error: String(e)
+      });
+
+      console.log(
+        "  ❌",
+        String(e)
+      );
+    }
+
+    await sleep(20);
+  }
+
+  // ============================================================
+  // INDIVIDUAL JSON DOWNLOADS
+  // ============================================================
+
+  console.log("Downloading individual JSON files...");
+
+  for (const file of files) {
+    const blob = new Blob([file.data], { type: "application/json" });
+    const downloadURL = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = downloadURL;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(downloadURL), 10000);
+    await sleep(10);
+  }
+
+  // ============================================================
+  // FINAL SUMMARY
+  // ============================================================
+
+  console.log("");
+  console.log(
+    "✅ BATCH COMPLETE"
+  );
+  console.log("");
+
+  console.log(
+    "Sitemap candidates:",
+    sitemapCandidates
+  );
+
+  console.log(
+    "Unique articles:  ",
+    articleURLs.length
+  );
+
+  console.log(
+    "Successful:        ",
+    files.length
+  );
+
+  console.log(
+    "Failed:            ",
+    failures.length
+  );
+
+  console.log(
+    "Unique JSON files: ",
+    new Set(
+      files.map(
+        f => f.name
+      )
+    ).size
+  );
+
+  if (
+    failures.length
+  ) {
+    console.table(
+      failures
+    );
+  }
+
+  return {
+    sitemapCandidates,
+    articleCount: articleURLs.length,
+    successful: files.length,
+    failed: failures.length,
+    failures
+  };
+})();

@@ -1,0 +1,889 @@
+(async () => {
+  const VERSION = "v1124";
+
+  // ==========================================================
+  // AUTOMATIC CYCLE ID + NAME
+  // ==========================================================
+
+  const cycleIdMatch =
+    location.pathname.match(/\/testcycles\/(\d+)/);
+
+  const CYCLE_ID =
+    cycleIdMatch?.[1] || null;
+
+  if (!CYCLE_ID) {
+    throw new Error(
+      "Could not determine uTest Cycle ID from the current page."
+    );
+  }
+
+  function cleanText(value) {
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function detectCycleName() {
+    const selectors = [
+      "h1",
+      "[class*='cycle-title']",
+      "[class*='CycleTitle']",
+      "[class*='test-cycle-title']",
+      "[class*='TestCycleTitle']"
+    ];
+
+    for (const selector of selectors) {
+      for (const el of document.querySelectorAll(selector)) {
+        const text =
+          cleanText(
+            el.innerText ||
+            el.textContent
+          );
+
+        if (
+          text &&
+          !/^uTest$/i.test(text) &&
+          !/^Test Cycle$/i.test(text)
+        ) {
+          return text;
+        }
+      }
+    }
+
+    const title =
+      cleanText(document.title);
+
+    if (
+      title &&
+      !/^uTest$/i.test(title)
+    ) {
+      return title;
+    }
+
+    const lines =
+      (document.body?.innerText || "")
+        .split(/\r?\n/)
+        .map(cleanText)
+        .filter(Boolean);
+
+    return (
+      lines.find(line =>
+        /uTest Academy|Test Cycle|Cycle/i.test(line)
+      ) ||
+      `uTest Cycle ${CYCLE_ID}`
+    );
+  }
+
+  const CYCLE_NAME =
+    detectCycleName();
+
+  const BASE =
+    `${location.origin}/testcycles/${CYCLE_ID}`;
+
+  // ==========================================================
+  // OUTPUT FILENAME
+  // ==========================================================
+
+  function safeFilename(text) {
+    return text
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 180);
+  }
+
+  const OUTPUT =
+    `utest-cycle-${safeFilename(CYCLE_NAME)}-testcases-v1124.json`;
+
+  const sleep =
+    ms => new Promise(r => setTimeout(r, ms));
+
+  const abs = href => {
+    try {
+      return new URL(
+        href,
+        location.href
+      ).href;
+    } catch {
+      return null;
+    }
+  };
+
+  // ==========================================================
+  // TEST-CASE LINK SCOPE
+  // ==========================================================
+
+  function isEligibleTestCaseLink(url) {
+    try {
+      const u =
+        new URL(url);
+
+      if (
+        u.origin !== location.origin
+      ) {
+        return false;
+      }
+
+      if (
+        !u.pathname.includes(
+          `/testcycles/${CYCLE_ID}`
+        )
+      ) {
+        return false;
+      }
+
+      if (
+        !/testcases/i.test(
+          u.pathname
+        )
+      ) {
+        return false;
+      }
+
+      if (
+        /^(mailto|javascript|tel):/i.test(
+          u.protocol
+        )
+      ) {
+        return false;
+      }
+
+      return true;
+
+    } catch {
+      return false;
+    }
+  }
+
+  // ==========================================================
+  // FETCH COMPLETE PAGE
+  // ==========================================================
+
+  async function fetchFullPage(url) {
+
+    try {
+
+      const response =
+        await fetch(
+          url,
+          {
+            method:
+              "GET",
+
+            credentials:
+              "include",
+
+            redirect:
+              "follow"
+          }
+        );
+
+      const html =
+        await response.text();
+
+      let text = "";
+
+      try {
+        text =
+          new DOMParser()
+            .parseFromString(
+              html,
+              "text/html"
+            )
+            .body?.innerText || "";
+      } catch {}
+
+      return {
+
+        url,
+
+        finalUrl:
+          response.url ||
+          url,
+
+        fetch: {
+
+          method:
+            "GET",
+
+          status:
+            response.status,
+
+          statusText:
+            response.statusText,
+
+          ok:
+            response.ok,
+
+          redirected:
+            response.redirected,
+
+          contentType:
+            response.headers.get(
+              "content-type"
+            ) || "",
+
+          contentLength:
+            html.length
+        },
+
+        content: {
+
+          html,
+
+          text,
+
+          htmlLength:
+            html.length,
+
+          textLength:
+            text.length
+        },
+
+        validation: {
+
+          htmlCaptured:
+            html.length > 0,
+
+          textCaptured:
+            text.length > 0,
+
+          valid:
+            response.ok &&
+            html.length > 0
+        }
+      };
+
+    } catch (error) {
+
+      return {
+
+        url,
+
+        finalUrl:
+          url,
+
+        fetch: {
+
+          method:
+            "GET",
+
+          status:
+            null,
+
+          statusText:
+            null,
+
+          ok:
+            false,
+
+          redirected:
+            false,
+
+          contentType:
+            "",
+
+          contentLength:
+            0
+        },
+
+        content: {
+
+          html:
+            "",
+
+          text:
+            "",
+
+          htmlLength:
+            0,
+
+          textLength:
+            0
+        },
+
+        validation: {
+
+          htmlCaptured:
+            false,
+
+          textCaptured:
+            false,
+
+          valid:
+            false
+        },
+
+        error:
+          String(error)
+      };
+    }
+  }
+
+  console.clear();
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "uTest TEST CASE EXTRACTION — v1124"
+  );
+
+  console.log(
+    "AUTOMATIC CYCLE NAME + FULL LINK HTML CAPTURE"
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "Cycle ID:",
+    CYCLE_ID
+  );
+
+  console.log(
+    "Cycle name:",
+    CYCLE_NAME
+  );
+
+  console.log(
+    "Current URL:",
+    location.href
+  );
+
+  console.log(
+    "Output:",
+    OUTPUT
+  );
+
+  // ==========================================================
+  // CURRENT TEST CASES PAGE
+  // ==========================================================
+
+  const pageHTML =
+    document.documentElement.outerHTML;
+
+  const pageText =
+    document.body?.innerText || "";
+
+  // ==========================================================
+  // DISCOVER LINKS
+  // ==========================================================
+
+  const discoveredLinks = [
+    ...new Set(
+      [...document.querySelectorAll("a[href]")]
+        .map(a =>
+          abs(
+            a.getAttribute("href")
+          )
+        )
+        .filter(Boolean)
+    )
+  ];
+
+  const testCaseLinks = [
+    ...new Set(
+      discoveredLinks
+        .filter(
+          isEligibleTestCaseLink
+        )
+    )
+  ];
+
+  console.log(
+    "Discovered links:",
+    discoveredLinks.length
+  );
+
+  console.log(
+    "Eligible test-case links:",
+    testCaseLinks.length
+  );
+
+  // ==========================================================
+  // STRUCTURED INDEX DATA
+  // ==========================================================
+
+  const headings = [
+    ...document.querySelectorAll(
+      "h1,h2,h3,h4,h5,h6"
+    )
+  ].map(el => ({
+    tag:
+      el.tagName,
+
+    text:
+      cleanText(el.innerText),
+
+    html:
+      el.outerHTML
+  }));
+
+  const tables = [
+    ...document.querySelectorAll("table")
+  ].map((table, index) => ({
+    index,
+
+    html:
+      table.outerHTML,
+
+    text:
+      table.innerText || ""
+  }));
+
+  const links = [
+    ...document.querySelectorAll("a[href]")
+  ].map(a => ({
+    text:
+      cleanText(a.innerText),
+
+    href:
+      a.href || "",
+
+    eligibleTestCaseLink:
+      isEligibleTestCaseLink(
+        a.href || ""
+      ),
+
+    html:
+      a.outerHTML
+  }));
+
+  const inputs = [
+    ...document.querySelectorAll(
+      "input,textarea,select,button"
+    )
+  ].map(el => ({
+    tag:
+      el.tagName,
+
+    type:
+      el.getAttribute("type"),
+
+    name:
+      el.getAttribute("name"),
+
+    id:
+      el.id || "",
+
+    value:
+      el.value || "",
+
+    text:
+      cleanText(el.innerText),
+
+    ariaLabel:
+      el.getAttribute("aria-label") || "",
+
+    html:
+      el.outerHTML
+  }));
+
+  // ==========================================================
+  // FETCH EVERY TEST CASE PAGE
+  // ==========================================================
+
+  const testCases = [];
+
+  for (
+    let i = 0;
+    i < testCaseLinks.length;
+    i++
+  ) {
+
+    const url =
+      testCaseLinks[i];
+
+    console.log("");
+
+    console.log(
+      `========== TEST CASE ${i + 1}/${testCaseLinks.length} ==========`
+    );
+
+    console.log(
+      url
+    );
+
+    const page =
+      await fetchFullPage(
+        url
+      );
+
+    testCases.push(
+      page
+    );
+
+    console.log(
+      "Status:",
+      page.fetch.status
+    );
+
+    console.log(
+      "HTML:",
+      page.content.htmlLength,
+      "chars"
+    );
+
+    console.log(
+      "Text:",
+      page.content.textLength,
+      "chars"
+    );
+
+    console.log(
+      "Valid:",
+      page.validation.valid
+    );
+
+    await sleep(250);
+  }
+
+  // ==========================================================
+  // VALIDATION
+  // ==========================================================
+
+  const testCasesCaptured =
+    testCases.filter(
+      page =>
+        page.validation
+          ?.valid === true
+    ).length;
+
+  const testCasesFailed =
+    testCases.filter(
+      page =>
+        page.validation
+          ?.valid !== true
+    ).length;
+
+  const testCaseInvariant =
+    testCases.length ===
+      testCaseLinks.length &&
+    testCases.every(
+      page =>
+        page.validation
+          ?.valid === true &&
+        page.content
+          ?.htmlLength > 0
+    );
+
+  const indexHTMLCaptured =
+    pageHTML.length > 0;
+
+  const indexTextCaptured =
+    pageText.length > 0;
+
+  const cycleIdentityValid =
+    !!CYCLE_ID &&
+    !!CYCLE_NAME;
+
+  const extractionComplete =
+    cycleIdentityValid &&
+    indexHTMLCaptured &&
+    indexTextCaptured &&
+    testCaseInvariant;
+
+  // ==========================================================
+  // FAILED TEST CASE REPORT
+  // ==========================================================
+
+  const failedTestCases =
+    testCases
+      .filter(
+        page =>
+          page.validation
+            ?.valid !== true
+      )
+      .map(page => ({
+        url:
+          page.url,
+
+        finalUrl:
+          page.finalUrl,
+
+        status:
+          page.fetch?.status,
+
+        statusText:
+          page.fetch?.statusText,
+
+        error:
+          page.error || null,
+
+        htmlLength:
+          page.content
+            ?.htmlLength || 0
+      }));
+
+  if (
+    failedTestCases.length
+  ) {
+
+    console.log("");
+
+    console.log(
+      "================ FAILED TEST CASE CAPTURES ================"
+    );
+
+    console.table(
+      failedTestCases
+    );
+
+    console.log(
+      "Full failed records:",
+      failedTestCases
+    );
+
+    console.log(
+      "============================================================"
+    );
+  }
+
+  // ==========================================================
+  // FINAL DATA OBJECT
+  // ==========================================================
+
+  const data = {
+
+    source:
+      "uTest",
+
+    extractorVersion:
+      VERSION,
+
+    extractionType:
+      "test-cases-index-full-linked-pages",
+
+    extractedAt:
+      new Date().toISOString(),
+
+    cycle: {
+
+      id:
+        CYCLE_ID,
+
+      name:
+        CYCLE_NAME,
+
+      url:
+        BASE
+    },
+
+    testCasesPage: {
+
+      url:
+        location.href,
+
+      title:
+        document.title,
+
+      html:
+        pageHTML,
+
+      text:
+        pageText,
+
+      htmlLength:
+        pageHTML.length,
+
+      textLength:
+        pageText.length
+    },
+
+    discoveredLinks: {
+
+      total:
+        discoveredLinks.length,
+
+      eligibleTestCaseLinks:
+        testCaseLinks
+    },
+
+    testCases,
+
+    structured: {
+
+      headings,
+
+      tables,
+
+      links,
+
+      inputs
+    },
+
+    verification: {
+
+      cycleIdFound:
+        !!CYCLE_ID,
+
+      cycleNameFound:
+        !!CYCLE_NAME,
+
+      indexHTMLCaptured:
+        indexHTMLCaptured,
+
+      indexTextCaptured:
+        indexTextCaptured,
+
+      testCaseLinksDiscovered:
+        testCaseLinks.length,
+
+      testCasesCaptured,
+
+      testCasesFailed,
+
+      testCaseInvariant,
+
+      extractionComplete
+    }
+  };
+
+  // ==========================================================
+  // DOWNLOAD
+  // ==========================================================
+
+  const json =
+    JSON.stringify(
+      data,
+      null,
+      2
+    );
+
+  const blob =
+    new Blob(
+      [json],
+      {
+        type:
+          "application/json"
+      }
+    );
+
+  const a =
+    document.createElement("a");
+
+  const objectURL =
+    URL.createObjectURL(blob);
+
+  a.href =
+    objectURL;
+
+  a.download =
+    OUTPUT;
+
+  document.body.appendChild(a);
+
+  a.click();
+
+  a.remove();
+
+  setTimeout(
+    () =>
+      URL.revokeObjectURL(
+        objectURL
+      ),
+    1000
+  );
+
+  // ==========================================================
+  // FINAL REPORT
+  // ==========================================================
+
+  console.log("");
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "uTest TEST CASE EXTRACTION COMPLETE"
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "Version:",
+    VERSION
+  );
+
+  console.log(
+    "Cycle:",
+    CYCLE_NAME
+  );
+
+  console.log(
+    "Cycle ID:",
+    CYCLE_ID
+  );
+
+  console.log(
+    "Test Cases URL:",
+    location.href
+  );
+
+  console.log(
+    "Index HTML:",
+    pageHTML.length
+  );
+
+  console.log(
+    "Index text:",
+    pageText.length
+  );
+
+  console.log(
+    "Discovered links:",
+    discoveredLinks.length
+  );
+
+  console.log(
+    "Eligible test-case links:",
+    testCaseLinks.length
+  );
+
+  console.log(
+    "Test cases captured:",
+    testCasesCaptured
+  );
+
+  console.log(
+    "Test cases failed:",
+    testCasesFailed
+  );
+
+  console.log(
+    "Test case invariant:",
+    testCaseInvariant
+  );
+
+  console.log(
+    "Cycle identity valid:",
+    cycleIdentityValid
+  );
+
+  console.log(
+    "Extraction complete:",
+    extractionComplete
+  );
+
+  console.log(
+    "JSON LENGTH:",
+    json.length
+  );
+
+  console.log(
+    "DOWNLOAD:",
+    OUTPUT
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+})();

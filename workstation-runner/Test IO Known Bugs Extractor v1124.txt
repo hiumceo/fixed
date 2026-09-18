@@ -1,0 +1,694 @@
+(async () => {
+  const VERSION = "v1124";
+  const CURRENT_URL = location.href;
+
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  const abs = href => {
+    try {
+      return new URL(href, location.href).href;
+    } catch {
+      return null;
+    }
+  };
+
+  const cleanText = value =>
+    String(value || "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  // ==========================================================
+  // TEST IO — KNOWN BUGS EXTRACTION
+  // v1124
+  //
+  // FULL KNOWN BUGS PAGE HTML + TEXT
+  // + FULL HTML/TEXT FOR EVERY LINKED BUG DETAIL PAGE
+  // + AUTOMATIC TEST/CYCLE NAME
+  // + AUTOMATIC FILENAME
+  // ==========================================================
+
+  const TEST_ID =
+    location.pathname.match(/\/tests\/([^/?#]+)/)?.[1] || null;
+
+  function detectName() {
+    const selectors = [
+      "h1",
+      "h2",
+      "[class*='title']",
+      "[class*='Title']",
+      "[class*='test-name']",
+      "[class*='TestName']",
+      "[class*='test-title']",
+      "[class*='TestTitle']",
+      "[class*='cycle-name']",
+      "[class*='CycleName']"
+    ];
+
+    for (const selector of selectors) {
+      for (const el of document.querySelectorAll(selector)) {
+        const text = cleanText(
+          el.innerText || el.textContent
+        );
+
+        if (
+          text &&
+          text.length > 2 &&
+          !/^test io$/i.test(text)
+        ) {
+          return text;
+        }
+      }
+    }
+
+    const title = cleanText(document.title);
+
+    if (title && !/^test io$/i.test(title)) {
+      return title;
+    }
+
+    const lines =
+      (document.body?.innerText || "")
+        .split(/\r?\n/)
+        .map(cleanText)
+        .filter(Boolean);
+
+    return (
+      lines.find(
+        x => x.length > 4 && !/^test io$/i.test(x)
+      ) ||
+      `Test-${TEST_ID || "unknown"}`
+    );
+  }
+
+  const TEST_NAME = detectName();
+
+  function safeFilename(text) {
+    return String(text || "")
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 180);
+  }
+
+  const OUTPUT =
+    `testio-${safeFilename(TEST_NAME)}-known-bugs-v1124.json`;
+
+  console.clear();
+
+  console.log("============================================================");
+  console.log("TEST IO KNOWN BUGS EXTRACTION — v1124");
+  console.log("FULL PAGE + FULL BUG DETAIL HTML");
+  console.log("============================================================");
+
+  console.log("Test ID:", TEST_ID);
+  console.log("Detected name:", TEST_NAME);
+  console.log("URL:", CURRENT_URL);
+
+  // ==========================================================
+  // CURRENT KNOWN BUGS PAGE
+  // ==========================================================
+
+  const pageHTML =
+    document.documentElement.outerHTML;
+
+  const pageText =
+    document.body?.innerText || "";
+
+  // ==========================================================
+  // DISCOVER ALL LINKS
+  // ==========================================================
+
+  const discoveredLinks = [
+    ...new Set(
+      [...document.querySelectorAll("a[href]")]
+        .map(a => abs(a.getAttribute("href")))
+        .filter(Boolean)
+    )
+  ];
+
+  // ==========================================================
+  // IDENTIFY BUG DETAIL LINKS
+  //
+  // We intentionally support several Test IO route forms
+  // rather than assuming one exact URL structure.
+  // ==========================================================
+
+  function isBugDetail(url) {
+    if (!url) return false;
+
+    try {
+      const u = new URL(url);
+
+      if (u.origin !== location.origin) {
+        return false;
+      }
+
+      const path = u.pathname.toLowerCase();
+
+      if (
+        /\.(png|jpg|jpeg|gif|svg|css|js|woff|woff2)$/i
+          .test(path)
+      ) {
+        return false;
+      }
+
+      if (
+        /\/assets\/|\/static\/|\/images\//i
+          .test(path)
+      ) {
+        return false;
+      }
+
+      // Known-bug detail pages generally resolve to a bug/issue
+      // record. Keep the test context when available.
+      const hasBugRoute =
+        /\/bugs?\//i.test(path) ||
+        /\/issues?\//i.test(path) ||
+        /\/testcases?\/.*\/bugs?\//i.test(path);
+
+      if (!hasBugRoute) {
+        return false;
+      }
+
+      if (TEST_ID) {
+        return (
+          path.includes(`/tests/${TEST_ID}/`) ||
+          path.includes(`/tests/${TEST_ID}`) ||
+          /\/bugs?\//i.test(path) ||
+          /\/issues?\//i.test(path)
+        );
+      }
+
+      return true;
+
+    } catch {
+      return false;
+    }
+  }
+
+  const bugLinks = [
+    ...new Set(
+      discoveredLinks.filter(
+        isBugDetail
+      )
+    )
+  ];
+
+  console.log(
+    "Discovered URLs:",
+    discoveredLinks.length
+  );
+
+  console.log(
+    "Known-bug/detail links:",
+    bugLinks.length
+  );
+
+  // ==========================================================
+  // PRESERVE ALL PAGE LINK METADATA
+  // ==========================================================
+
+  const pageLinks = [
+    ...document.querySelectorAll("a[href]")
+  ].map(a => ({
+    text:
+      cleanText(a.innerText || a.textContent),
+
+    href:
+      a.href || "",
+
+    bugDetail:
+      isBugDetail(a.href || ""),
+
+    html:
+      a.outerHTML
+  }));
+
+  // ==========================================================
+  // FETCH FULL BUG DETAIL PAGE
+  // ==========================================================
+
+  async function fetchBug(url) {
+    try {
+      const response =
+        await fetch(
+          url,
+          {
+            method: "GET",
+            credentials: "include",
+            redirect: "follow"
+          }
+        );
+
+      const html =
+        await response.text();
+
+      let text = "";
+
+      try {
+        const doc =
+          new DOMParser()
+            .parseFromString(
+              html,
+              "text/html"
+            );
+
+        text =
+          doc.body?.innerText || "";
+      } catch {}
+
+      return {
+        url,
+
+        finalUrl:
+          response.url || url,
+
+        fetch: {
+          method: "GET",
+          status: response.status,
+          statusText: response.statusText,
+          ok: response.ok,
+          redirected: response.redirected,
+          contentType:
+            response.headers.get("content-type") || "",
+          contentLength: html.length
+        },
+
+        content: {
+          html,
+          text,
+          htmlLength: html.length,
+          textLength: text.length
+        },
+
+        validation: {
+          htmlCaptured:
+            html.length > 0,
+
+          textCaptured:
+            text.length > 0,
+
+          valid:
+            response.ok &&
+            html.length > 0
+        }
+      };
+
+    } catch (error) {
+      return {
+        url,
+
+        finalUrl:
+          url,
+
+        fetch: {
+          method: "GET",
+          status: null,
+          statusText: null,
+          ok: false,
+          redirected: false,
+          contentType: "",
+          contentLength: 0
+        },
+
+        content: {
+          html: "",
+          text: "",
+          htmlLength: 0,
+          textLength: 0
+        },
+
+        validation: {
+          htmlCaptured: false,
+          textCaptured: false,
+          valid: false
+        },
+
+        error:
+          String(error)
+      };
+    }
+  }
+
+  // ==========================================================
+  // CAPTURE EVERY BUG DETAIL PAGE
+  // ==========================================================
+
+  const bugs = [];
+
+  for (let i = 0; i < bugLinks.length; i++) {
+    const url = bugLinks[i];
+
+    console.log("");
+    console.log(
+      `========== KNOWN BUG ${i + 1}/${bugLinks.length} ==========`
+    );
+
+    console.log("URL:", url);
+
+    const record =
+      await fetchBug(url);
+
+    bugs.push(record);
+
+    console.log(
+      "Status:",
+      record.fetch.status
+    );
+
+    console.log(
+      "HTML:",
+      record.content.htmlLength,
+      "chars"
+    );
+
+    console.log(
+      "Text:",
+      record.content.textLength,
+      "chars"
+    );
+
+    console.log(
+      "Valid:",
+      record.validation.valid
+    );
+
+    await sleep(250);
+  }
+
+  // ==========================================================
+  // VALIDATION
+  // ==========================================================
+
+  const bugsCaptured =
+    bugs.filter(
+      x => x.validation?.valid === true
+    ).length;
+
+  const bugsFailed =
+    bugs.filter(
+      x => x.validation?.valid !== true
+    ).length;
+
+  const pageHTMLCaptured =
+    pageHTML.length > 0;
+
+  const pageTextCaptured =
+    pageText.length > 0;
+
+  const identityValid =
+    !!TEST_ID &&
+    !!TEST_NAME;
+
+  const bugLinksInvariant =
+    bugs.length === bugLinks.length &&
+    bugs.every(
+      x =>
+        x.validation?.valid === true &&
+        x.content?.htmlLength > 0 &&
+        x.content?.textLength > 0
+    );
+
+  const extractionComplete =
+    identityValid &&
+    pageHTMLCaptured &&
+    pageTextCaptured &&
+    bugLinksInvariant;
+
+  // ==========================================================
+  // FAILED CAPTURES
+  // ==========================================================
+
+  const failedRecords =
+    bugs
+      .filter(
+        x => x.validation?.valid !== true
+      )
+      .map(
+        x => ({
+          url: x.url,
+          finalUrl: x.finalUrl,
+          status: x.fetch?.status,
+          statusText: x.fetch?.statusText,
+          error: x.error || null,
+          htmlLength:
+            x.content?.htmlLength || 0,
+          textLength:
+            x.content?.textLength || 0
+        })
+      );
+
+  if (failedRecords.length) {
+    console.log("");
+    console.log(
+      "================ FAILED BUG CAPTURES ================"
+    );
+
+    console.table(
+      failedRecords
+    );
+
+    console.log(
+      "Full failed records:",
+      failedRecords
+    );
+
+    console.log(
+      "======================================================"
+    );
+  }
+
+  // ==========================================================
+  // FINAL DATA OBJECT
+  // ==========================================================
+
+  const data = {
+    source: "Test IO",
+
+    extractorVersion:
+      VERSION,
+
+    extractionType:
+      "known-bugs-full-detail-pages",
+
+    extractedAt:
+      new Date().toISOString(),
+
+    test: {
+      id:
+        TEST_ID,
+
+      name:
+        TEST_NAME,
+
+      url:
+        CURRENT_URL
+    },
+
+    knownBugsPage: {
+      url:
+        CURRENT_URL,
+
+      title:
+        document.title,
+
+      html:
+        pageHTML,
+
+      text:
+        pageText,
+
+      htmlLength:
+        pageHTML.length,
+
+      textLength:
+        pageText.length
+    },
+
+    discoveredLinks: {
+      total:
+        discoveredLinks.length,
+
+      knownBugDetail:
+        bugLinks
+    },
+
+    bugs,
+
+    pageLinks,
+
+    verification: {
+      testIdFound:
+        !!TEST_ID,
+
+      testNameFound:
+        !!TEST_NAME,
+
+      pageHTMLCaptured:
+        pageHTMLCaptured,
+
+      pageTextCaptured:
+        pageTextCaptured,
+
+      eligibleBugLinks:
+        bugLinks.length,
+
+      bugPagesCaptured:
+        bugsCaptured,
+
+      bugPagesFailed:
+        bugsFailed,
+
+      bugLinksInvariant:
+        bugLinksInvariant,
+
+      extractionComplete:
+        extractionComplete
+    }
+  };
+
+  // ==========================================================
+  // DOWNLOAD
+  // ==========================================================
+
+  const json =
+    JSON.stringify(
+      data,
+      null,
+      2
+    );
+
+  const blob =
+    new Blob(
+      [json],
+      {
+        type:
+          "application/json"
+      }
+    );
+
+  const a =
+    document.createElement("a");
+
+  const objectURL =
+    URL.createObjectURL(blob);
+
+  a.href =
+    objectURL;
+
+  a.download =
+    OUTPUT;
+
+  document.body.appendChild(a);
+
+  a.click();
+
+  a.remove();
+
+  setTimeout(
+    () =>
+      URL.revokeObjectURL(
+        objectURL
+      ),
+    1000
+  );
+
+  // ==========================================================
+  // FINAL REPORT
+  // ==========================================================
+
+  console.log("");
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "TEST IO KNOWN BUGS EXTRACTION COMPLETE"
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "Version:",
+    VERSION
+  );
+
+  console.log(
+    "Test ID:",
+    TEST_ID
+  );
+
+  console.log(
+    "Detected name:",
+    TEST_NAME
+  );
+
+  console.log(
+    "Known Bugs URL:",
+    CURRENT_URL
+  );
+
+  console.log(
+    "Known Bugs HTML:",
+    pageHTML.length
+  );
+
+  console.log(
+    "Known Bugs text:",
+    pageText.length
+  );
+
+  console.log(
+    "Discovered URLs:",
+    discoveredLinks.length
+  );
+
+  console.log(
+    "Eligible bug links:",
+    bugLinks.length
+  );
+
+  console.log(
+    "Bug pages captured:",
+    bugsCaptured
+  );
+
+  console.log(
+    "Bug pages failed:",
+    bugsFailed
+  );
+
+  console.log(
+    "Bug links invariant:",
+    bugLinksInvariant
+  );
+
+  console.log(
+    "Identity valid:",
+    identityValid
+  );
+
+  console.log(
+    "Extraction complete:",
+    extractionComplete
+  );
+
+  console.log(
+    "JSON LENGTH:",
+    json.length
+  );
+
+  console.log(
+    "DOWNLOAD:",
+    OUTPUT
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+})();

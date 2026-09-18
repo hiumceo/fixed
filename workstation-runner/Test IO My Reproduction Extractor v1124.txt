@@ -1,0 +1,965 @@
+(async () => {
+  const VERSION = "v1124";
+  const CURRENT_URL = location.href;
+
+  // ==========================================================
+  // TEST IO — MY REPRODUCTION EXTRACTION
+  // v1124
+  //
+  // FULL LIST PAGE HTML/TEXT
+  // + FULL HTML/TEXT FOR EVERY REPRODUCTION DETAIL PAGE
+  // + AUTOMATIC TEST NAME
+  // + AUTOMATIC FILENAME
+  // ==========================================================
+
+  const sleep =
+    ms => new Promise(r => setTimeout(r, ms));
+
+  const abs =
+    href => {
+      try {
+        return new URL(
+          href,
+          location.href
+        ).href;
+      } catch {
+        return null;
+      }
+    };
+
+  const cleanText =
+    value =>
+      String(value || "")
+        .replace(/\s+/g, " ")
+        .trim();
+
+  // ==========================================================
+  // TEST ID
+  // ==========================================================
+
+  const testMatch =
+    CURRENT_URL.match(
+      /\/tests\/([^/?#]+)/
+    );
+
+  const TEST_ID =
+    testMatch?.[1] || null;
+
+  if (!TEST_ID) {
+    throw new Error(
+      "Could not determine Test IO test ID from current URL."
+    );
+  }
+
+  // ==========================================================
+  // AUTOMATIC TEST / PAGE NAME
+  // ==========================================================
+
+  function detectName() {
+
+    const selectors = [
+      "h1",
+      "h2",
+      "[class*='title']",
+      "[class*='Title']",
+      "[class*='test-name']",
+      "[class*='TestName']",
+      "[class*='test-title']",
+      "[class*='TestTitle']",
+      "[class*='cycle-name']",
+      "[class*='CycleName']"
+    ];
+
+    for (const selector of selectors) {
+
+      const elements =
+        document.querySelectorAll(
+          selector
+        );
+
+      for (const el of elements) {
+
+        const text =
+          cleanText(
+            el.innerText ||
+            el.textContent
+          );
+
+        if (
+          text &&
+          text.length > 2 &&
+          !/^test io$/i.test(text)
+        ) {
+          return text;
+        }
+      }
+    }
+
+    const title =
+      cleanText(
+        document.title
+      );
+
+    if (
+      title &&
+      !/^test io$/i.test(title)
+    ) {
+      return title;
+    }
+
+    const lines =
+      (document.body?.innerText || "")
+        .split(/\r?\n/)
+        .map(cleanText)
+        .filter(Boolean);
+
+    return (
+      lines.find(
+        line =>
+          line.length > 4 &&
+          !/^test io$/i.test(line)
+      ) ||
+      `Test-${TEST_ID}`
+    );
+  }
+
+  const TEST_NAME =
+    detectName();
+
+  // ==========================================================
+  // SAFE AUTOMATIC FILENAME
+  // ==========================================================
+
+  function safeFilename(text) {
+
+    return String(text || "")
+      .replace(
+        /[<>:"/\\|?*\x00-\x1F]/g,
+        ""
+      )
+      .replace(
+        /\s+/g,
+        "-"
+      )
+      .replace(
+        /-+/g,
+        "-"
+      )
+      .replace(
+        /^-|-$/g,
+        ""
+      )
+      .slice(
+        0,
+        180
+      );
+  }
+
+  const OUTPUT =
+    `testio-${safeFilename(TEST_NAME)}-my-reproduction-v1124.json`;
+
+  console.clear();
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "TEST IO MY REPRODUCTION EXTRACTION — v1124"
+  );
+
+  console.log(
+    "FULL PAGE + FULL REPRODUCTION DETAIL HTML"
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "Test ID:",
+    TEST_ID
+  );
+
+  console.log(
+    "Detected name:",
+    TEST_NAME
+  );
+
+  console.log(
+    "URL:",
+    CURRENT_URL
+  );
+
+  // ==========================================================
+  // CURRENT MY REPRODUCTION PAGE
+  // ==========================================================
+
+  const pageHTML =
+    document.documentElement.outerHTML;
+
+  const pageText =
+    document.body?.innerText ||
+    "";
+
+  // ==========================================================
+  // LINK DISCOVERY
+  //
+  // We do not assume a particular button/class.
+  // Discover all links on the current page and identify
+  // reproduction/bug detail URLs belonging to this test.
+  // ==========================================================
+
+  const discoveredLinks = [
+    ...new Set(
+      [
+        ...document.querySelectorAll(
+          "a[href]"
+        )
+      ]
+        .map(
+          a =>
+            abs(
+              a.getAttribute(
+                "href"
+              )
+            )
+        )
+        .filter(Boolean)
+    )
+  ];
+
+  function sameTest(url) {
+
+    try {
+
+      const u =
+        new URL(url);
+
+      return (
+        u.origin ===
+          location.origin &&
+        u.pathname.includes(
+          `/tests/${TEST_ID}`
+        )
+      );
+
+    } catch {
+      return false;
+    }
+  }
+
+  function isReproductionDetail(url) {
+
+    if (!sameTest(url)) {
+      return false;
+    }
+
+    try {
+
+      const u =
+        new URL(url);
+
+      const path =
+        u.pathname.toLowerCase();
+
+      if (
+        /\.(png|jpg|jpeg|gif|svg|css|js|woff|woff2)$/i
+          .test(path)
+      ) {
+        return false;
+      }
+
+      if (
+        /\/assets\/|\/static\/|\/images\//i
+          .test(path)
+      ) {
+        return false;
+      }
+
+      /*
+       * Test IO can expose reproduction/detail records
+       * using bug/reproduction/issue-style routes.
+       *
+       * The current URL itself is excluded.
+       */
+
+      if (
+        u.href.replace(
+          /\/$/,
+          ""
+        ) ===
+        CURRENT_URL.replace(
+          /\/$/,
+          ""
+        )
+      ) {
+        return false;
+      }
+
+      return (
+        /\/bugs?\//i.test(path) ||
+        /\/reproductions?\//i.test(path) ||
+        /\/issues?\//i.test(path)
+      );
+
+    } catch {
+      return false;
+    }
+  }
+
+  const sameTestLinks =
+    discoveredLinks.filter(
+      sameTest
+    );
+
+  const reproductionLinks = [
+    ...new Set(
+      discoveredLinks.filter(
+        isReproductionDetail
+      )
+    )
+  ];
+
+  console.log(
+    "Discovered URLs:",
+    discoveredLinks.length
+  );
+
+  console.log(
+    "Same-test URLs:",
+    sameTestLinks.length
+  );
+
+  console.log(
+    "Reproduction/detail links:",
+    reproductionLinks.length
+  );
+
+  // ==========================================================
+  // PRESERVE LINK METADATA
+  // ==========================================================
+
+  const pageLinks = [
+    ...document.querySelectorAll(
+      "a[href]"
+    )
+  ].map(
+    a => ({
+
+      text:
+        cleanText(
+          a.innerText
+        ),
+
+      href:
+        a.href || "",
+
+      sameTest:
+        sameTest(
+          a.href || ""
+        ),
+
+      reproductionDetail:
+        isReproductionDetail(
+          a.href || ""
+        ),
+
+      html:
+        a.outerHTML
+    })
+  );
+
+  // ==========================================================
+  // FETCH FULL DETAIL PAGE
+  // ==========================================================
+
+  async function fetchDetailPage(url) {
+
+    try {
+
+      const response =
+        await fetch(
+          url,
+          {
+            method:
+              "GET",
+
+            credentials:
+              "include",
+
+            redirect:
+              "follow"
+          }
+        );
+
+      const html =
+        await response.text();
+
+      let text =
+        "";
+
+      try {
+
+        const doc =
+          new DOMParser()
+            .parseFromString(
+              html,
+              "text/html"
+            );
+
+        text =
+          doc.body?.innerText ||
+          "";
+
+      } catch {}
+
+      return {
+
+        url,
+
+        finalUrl:
+          response.url ||
+          url,
+
+        fetch: {
+
+          method:
+            "GET",
+
+          status:
+            response.status,
+
+          statusText:
+            response.statusText,
+
+          ok:
+            response.ok,
+
+          redirected:
+            response.redirected,
+
+          contentType:
+            response.headers.get(
+              "content-type"
+            ) || "",
+
+          contentLength:
+            html.length
+        },
+
+        content: {
+
+          html,
+
+          text,
+
+          htmlLength:
+            html.length,
+
+          textLength:
+            text.length
+        },
+
+        validation: {
+
+          htmlCaptured:
+            html.length > 0,
+
+          textCaptured:
+            text.length > 0,
+
+          valid:
+            response.ok &&
+            html.length > 0
+        }
+
+      };
+
+    } catch (error) {
+
+      return {
+
+        url,
+
+        finalUrl:
+          url,
+
+        fetch: {
+
+          method:
+            "GET",
+
+          status:
+            null,
+
+          statusText:
+            null,
+
+          ok:
+            false,
+
+          redirected:
+            false,
+
+          contentType:
+            "",
+
+          contentLength:
+            0
+        },
+
+        content: {
+
+          html:
+            "",
+
+          text:
+            "",
+
+          htmlLength:
+            0,
+
+          textLength:
+            0
+        },
+
+        validation: {
+
+          htmlCaptured:
+            false,
+
+          textCaptured:
+            false,
+
+          valid:
+            false
+        },
+
+        error:
+          String(error)
+      };
+    }
+  }
+
+  // ==========================================================
+  // CAPTURE EVERY DETAIL PAGE
+  // ==========================================================
+
+  const reproductions = [];
+
+  for (
+    let i = 0;
+    i < reproductionLinks.length;
+    i++
+  ) {
+
+    const url =
+      reproductionLinks[i];
+
+    console.log("");
+
+    console.log(
+      `========== REPRODUCTION ${i + 1}/${reproductionLinks.length} ==========`
+    );
+
+    console.log(
+      "URL:",
+      url
+    );
+
+    const record =
+      await fetchDetailPage(
+        url
+      );
+
+    reproductions.push(
+      record
+    );
+
+    console.log(
+      "Status:",
+      record.fetch.status
+    );
+
+    console.log(
+      "HTML:",
+      record.content.htmlLength,
+      "chars"
+    );
+
+    console.log(
+      "Text:",
+      record.content.textLength,
+      "chars"
+    );
+
+    console.log(
+      "Valid:",
+      record.validation.valid
+    );
+
+    await sleep(
+      250
+    );
+  }
+
+  // ==========================================================
+  // VALIDATION
+  // ==========================================================
+
+  const reproductionsCaptured =
+    reproductions.filter(
+      record =>
+        record.validation
+          ?.valid === true
+    ).length;
+
+  const reproductionsFailed =
+    reproductions.filter(
+      record =>
+        record.validation
+          ?.valid !== true
+    ).length;
+
+  const detailInvariant =
+    reproductions.length ===
+      reproductionLinks.length &&
+    reproductions.every(
+      record =>
+        record.validation
+          ?.valid === true &&
+        record.content
+          ?.htmlLength > 0
+    );
+
+  const pageHTMLCaptured =
+    pageHTML.length > 0;
+
+  const pageTextCaptured =
+    pageText.length > 0;
+
+  const identityValid =
+    !!TEST_ID &&
+    !!TEST_NAME;
+
+  const extractionComplete =
+    identityValid &&
+    pageHTMLCaptured &&
+    pageTextCaptured &&
+    detailInvariant;
+
+  // ==========================================================
+  // FAILED DETAIL REPORT
+  // ==========================================================
+
+  const failedRecords =
+    reproductions
+      .filter(
+        record =>
+          record.validation
+            ?.valid !== true
+      )
+      .map(
+        record => ({
+
+          url:
+            record.url,
+
+          finalUrl:
+            record.finalUrl,
+
+          status:
+            record.fetch?.status,
+
+          statusText:
+            record.fetch?.statusText,
+
+          error:
+            record.error ||
+            null,
+
+          htmlLength:
+            record.content
+              ?.htmlLength ||
+            0
+        })
+      );
+
+  if (
+    failedRecords.length
+  ) {
+
+    console.log("");
+
+    console.log(
+      "================ FAILED DETAIL CAPTURES ================"
+    );
+
+    console.table(
+      failedRecords
+    );
+
+    console.log(
+      "Full failed records:",
+      failedRecords
+    );
+
+    console.log(
+      "=========================================================="
+    );
+  }
+
+  // ==========================================================
+  // FINAL DATA OBJECT
+  // ==========================================================
+
+  const data = {
+
+    source:
+      "Test IO",
+
+    extractorVersion:
+      VERSION,
+
+    extractionType:
+      "my-reproduction-full-detail-pages",
+
+    extractedAt:
+      new Date().toISOString(),
+
+    test: {
+
+      id:
+        TEST_ID,
+
+      name:
+        TEST_NAME,
+
+      url:
+        CURRENT_URL
+    },
+
+    myReproductionPage: {
+
+      url:
+        CURRENT_URL,
+
+      title:
+        document.title,
+
+      html:
+        pageHTML,
+
+      text:
+        pageText,
+
+      htmlLength:
+        pageHTML.length,
+
+      textLength:
+        pageText.length
+    },
+
+    discoveredLinks: {
+
+      total:
+        discoveredLinks.length,
+
+      sameTest:
+        sameTestLinks,
+
+      reproductionDetail:
+        reproductionLinks
+    },
+
+    reproductions,
+
+    pageLinks,
+
+    verification: {
+
+      testIdFound:
+        !!TEST_ID,
+
+      testNameFound:
+        !!TEST_NAME,
+
+      pageHTMLCaptured:
+        pageHTMLCaptured,
+
+      pageTextCaptured:
+        pageTextCaptured,
+
+      eligibleDetailLinks:
+        reproductionLinks.length,
+
+      reproductionPagesCaptured:
+        reproductionsCaptured,
+
+      reproductionPagesFailed:
+        reproductionsFailed,
+
+      detailInvariant:
+        detailInvariant,
+
+      extractionComplete:
+        extractionComplete
+    }
+  };
+
+  // ==========================================================
+  // DOWNLOAD
+  // ==========================================================
+
+  const json =
+    JSON.stringify(
+      data,
+      null,
+      2
+    );
+
+  const blob =
+    new Blob(
+      [json],
+      {
+        type:
+          "application/json"
+      }
+    );
+
+  const a =
+    document.createElement(
+      "a"
+    );
+
+  const objectURL =
+    URL.createObjectURL(
+      blob
+    );
+
+  a.href =
+    objectURL;
+
+  a.download =
+    OUTPUT;
+
+  document.body.appendChild(
+    a
+  );
+
+  a.click();
+
+  a.remove();
+
+  setTimeout(
+    () =>
+      URL.revokeObjectURL(
+        objectURL
+      ),
+    1000
+  );
+
+  // ==========================================================
+  // FINAL REPORT
+  // ==========================================================
+
+  console.log("");
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "TEST IO MY REPRODUCTION EXTRACTION COMPLETE"
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "Version:",
+    VERSION
+  );
+
+  console.log(
+    "Test ID:",
+    TEST_ID
+  );
+
+  console.log(
+    "Detected name:",
+    TEST_NAME
+  );
+
+  console.log(
+    "My Reproduction URL:",
+    CURRENT_URL
+  );
+
+  console.log(
+    "Page HTML:",
+    pageHTML.length
+  );
+
+  console.log(
+    "Page text:",
+    pageText.length
+  );
+
+  console.log(
+    "Discovered URLs:",
+    discoveredLinks.length
+  );
+
+  console.log(
+    "Same-test URLs:",
+    sameTestLinks.length
+  );
+
+  console.log(
+    "Eligible detail links:",
+    reproductionLinks.length
+  );
+
+  console.log(
+    "Detail pages captured:",
+    reproductionsCaptured
+  );
+
+  console.log(
+    "Detail pages failed:",
+    reproductionsFailed
+  );
+
+  console.log(
+    "Detail invariant:",
+    detailInvariant
+  );
+
+  console.log(
+    "Identity valid:",
+    identityValid
+  );
+
+  console.log(
+    "Extraction complete:",
+    extractionComplete
+  );
+
+  console.log(
+    "JSON LENGTH:",
+    json.length
+  );
+
+  console.log(
+    "DOWNLOAD:",
+    OUTPUT
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+})();

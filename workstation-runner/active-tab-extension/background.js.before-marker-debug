@@ -1,0 +1,76 @@
+﻿const RUNNER_URL = "http://127.0.0.1:18724/browser/active-tab";
+
+async function reportActiveTab(tabId, windowId) {
+  if (!Number.isInteger(tabId)) {
+    return;
+  }
+
+  try {
+    await fetch(RUNNER_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain;charset=UTF-8"
+      },
+      body: JSON.stringify({
+        browser: "chrome",
+        tabId,
+        windowId
+      })
+    });
+  } catch {
+    // Runner may not be ready yet.
+  }
+}
+
+async function markActiveTab(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return;
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: {
+        tabId
+      },
+      func: (id) => {
+        if (document.documentElement) {
+          document.documentElement.setAttribute(
+            "data-v1124-tab-id",
+            String(id)
+          );
+        }
+      },
+      args: [tabId]
+    });
+  } catch {
+    // Some browser-controlled pages cannot be scripted.
+  }
+}
+
+async function syncTab(tabId, windowId) {
+  await reportActiveTab(tabId, windowId);
+  await markActiveTab(tabId);
+}
+
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  void syncTab(tabId, windowId);
+});
+
+async function reportCurrentTab() {
+  try {
+    const tabs = await chrome.tabs.query({
+      active: true,
+      lastFocusedWindow: true
+    });
+
+    const tab = tabs[0];
+
+    if (tab && Number.isInteger(tab.id)) {
+      await syncTab(tab.id, tab.windowId);
+    }
+  } catch {
+    // Ignore startup races.
+  }
+}
+
+void reportCurrentTab();

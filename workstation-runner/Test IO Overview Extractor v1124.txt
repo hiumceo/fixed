@@ -1,0 +1,904 @@
+(async () => {
+  const VERSION = "v1124";
+
+  // ==========================================================
+  // AUTOMATIC TEST IO CYCLE DETECTION
+  // ==========================================================
+
+  const currentUrl = location.href;
+
+  const cycleMatch =
+    currentUrl.match(/\/tests\/([^/?#]+)/);
+
+  const TEST_ID =
+    cycleMatch?.[1] || null;
+
+  if (!TEST_ID) {
+    throw new Error(
+      "Could not determine Test IO test/cycle ID from the current URL."
+    );
+  }
+
+  const sleep =
+    ms => new Promise(r => setTimeout(r, ms));
+
+  const abs = href => {
+    try {
+      return new URL(
+        href,
+        location.href
+      ).href;
+    } catch {
+      return null;
+    }
+  };
+
+  const cleanText = value =>
+    String(value || "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  // ==========================================================
+  // AUTOMATIC PAGE / CYCLE NAME
+  // ==========================================================
+
+  function detectName() {
+
+    const selectors = [
+      "h1",
+      "h2",
+      "[class*='title']",
+      "[class*='Title']",
+      "[class*='test-name']",
+      "[class*='TestName']",
+      "[class*='test-title']",
+      "[class*='TestTitle']"
+    ];
+
+    for (const selector of selectors) {
+
+      const elements =
+        [...document.querySelectorAll(selector)];
+
+      for (const el of elements) {
+
+        const text =
+          cleanText(
+            el.innerText ||
+            el.textContent
+          );
+
+        if (
+          text &&
+          text.length > 2 &&
+          !/^test io$/i.test(text)
+        ) {
+          return text;
+        }
+      }
+    }
+
+    const title =
+      cleanText(document.title);
+
+    if (
+      title &&
+      !/^test io$/i.test(title)
+    ) {
+      return title;
+    }
+
+    const lines =
+      (document.body?.innerText || "")
+        .split(/\r?\n/)
+        .map(cleanText)
+        .filter(Boolean);
+
+    return (
+      lines.find(line =>
+        line.length > 4 &&
+        !/^test io$/i.test(line)
+      ) ||
+      `Test-${TEST_ID}`
+    );
+  }
+
+  const TEST_NAME =
+    detectName();
+
+  // ==========================================================
+  // SAFE AUTOMATIC FILENAME
+  // ==========================================================
+
+  function safeFilename(text) {
+    return text
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 180);
+  }
+
+  const OUTPUT =
+    `testio-${safeFilename(TEST_NAME)}-overview-v1124.json`;
+
+  // ==========================================================
+  // LOG
+  // ==========================================================
+
+  console.clear();
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "TEST IO OVERVIEW EXTRACTION — v1124"
+  );
+
+  console.log(
+    "AUTOMATIC NAME + FULL LINK HTML CAPTURE"
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "Test ID:",
+    TEST_ID
+  );
+
+  console.log(
+    "Detected name:",
+    TEST_NAME
+  );
+
+  console.log(
+    "Current URL:",
+    location.href
+  );
+
+  console.log(
+    "Download:",
+    OUTPUT
+  );
+
+  // ==========================================================
+  // CURRENT OVERVIEW PAGE
+  // ==========================================================
+
+  const overviewHTML =
+    document.documentElement.outerHTML;
+
+  const overviewText =
+    document.body?.innerText || "";
+
+  // ==========================================================
+  // DISCOVER SAME-TEST LINKS
+  //
+  // Only capture actual Test IO pages belonging to this test.
+  // Exclude static assets and unrelated external links.
+  // ==========================================================
+
+  function isEligibleLink(url) {
+
+    try {
+
+      const u =
+        new URL(url);
+
+      if (
+        u.origin !== location.origin
+      ) {
+        return false;
+      }
+
+      if (
+        !u.pathname.includes(
+          `/tests/${TEST_ID}`
+        )
+      ) {
+        return false;
+      }
+
+      if (
+        /\/assets\/|\/static\/|\/images\/|\.png$|\.jpg$|\.jpeg$|\.gif$|\.svg$|\.css$|\.js$/i
+          .test(u.pathname)
+      ) {
+        return false;
+      }
+
+      if (
+        /^(mailto|javascript|tel):/i.test(
+          u.protocol
+        )
+      ) {
+        return false;
+      }
+
+      return true;
+
+    } catch {
+      return false;
+    }
+  }
+
+  const discoveredLinks = [
+    ...new Set(
+      [...document.querySelectorAll("a[href]")]
+        .map(a =>
+          abs(
+            a.getAttribute("href")
+          )
+        )
+        .filter(Boolean)
+    )
+  ];
+
+  const eligibleLinks = [
+    ...new Set(
+      discoveredLinks
+        .filter(isEligibleLink)
+    )
+  ];
+
+  // Always preserve the current page.
+  if (
+    isEligibleLink(location.href)
+  ) {
+    eligibleLinks.unshift(
+      location.href
+    );
+  }
+
+  const uniqueLinks =
+    [...new Set(eligibleLinks)];
+
+  console.log(
+    "Discovered URLs:",
+    discoveredLinks.length
+  );
+
+  console.log(
+    "Eligible Test IO links:",
+    uniqueLinks.length
+  );
+
+  // ==========================================================
+  // STRUCTURED PAGE DATA
+  // ==========================================================
+
+  const headings = [
+    ...document.querySelectorAll(
+      "h1,h2,h3,h4,h5,h6"
+    )
+  ].map(el => ({
+    tag:
+      el.tagName,
+
+    text:
+      cleanText(el.innerText),
+
+    html:
+      el.outerHTML
+  }));
+
+  const links = [
+    ...document.querySelectorAll(
+      "a[href]"
+    )
+  ].map(a => ({
+    text:
+      cleanText(a.innerText),
+
+    href:
+      a.href || "",
+
+    eligible:
+      isEligibleLink(
+        a.href || ""
+      ),
+
+    html:
+      a.outerHTML
+  }));
+
+  const tables = [
+    ...document.querySelectorAll("table")
+  ].map((table, index) => ({
+    index,
+
+    html:
+      table.outerHTML,
+
+    text:
+      table.innerText || ""
+  }));
+
+  const forms = [
+    ...document.querySelectorAll(
+      "form"
+    )
+  ].map(form => ({
+    action:
+      form.action || "",
+
+    method:
+      form.method || "",
+
+    html:
+      form.outerHTML
+  }));
+
+  // ==========================================================
+  // FULL PAGE FETCH
+  // ==========================================================
+
+  async function fetchFullPage(url) {
+
+    try {
+
+      const response =
+        await fetch(
+          url,
+          {
+            method:
+              "GET",
+
+            credentials:
+              "include",
+
+            redirect:
+              "follow"
+          }
+        );
+
+      const html =
+        await response.text();
+
+      let text = "";
+
+      try {
+
+        text =
+          new DOMParser()
+            .parseFromString(
+              html,
+              "text/html"
+            )
+            .body?.innerText || "";
+
+      } catch {}
+
+      return {
+
+        url,
+
+        finalUrl:
+          response.url ||
+          url,
+
+        fetch: {
+
+          method:
+            "GET",
+
+          status:
+            response.status,
+
+          statusText:
+            response.statusText,
+
+          ok:
+            response.ok,
+
+          redirected:
+            response.redirected,
+
+          contentType:
+            response.headers.get(
+              "content-type"
+            ) || "",
+
+          contentLength:
+            html.length
+        },
+
+        content: {
+
+          html,
+
+          text,
+
+          htmlLength:
+            html.length,
+
+          textLength:
+            text.length
+        },
+
+        validation: {
+
+          htmlCaptured:
+            html.length > 0,
+
+          textCaptured:
+            text.length > 0,
+
+          valid:
+            response.ok &&
+            html.length > 0
+        }
+
+      };
+
+    } catch (error) {
+
+      return {
+
+        url,
+
+        finalUrl:
+          url,
+
+        fetch: {
+
+          method:
+            "GET",
+
+          status:
+            null,
+
+          statusText:
+            null,
+
+          ok:
+            false,
+
+          redirected:
+            false,
+
+          contentType:
+            "",
+
+          contentLength:
+            0
+        },
+
+        content: {
+
+          html:
+            "",
+
+          text:
+            "",
+
+          htmlLength:
+            0,
+
+          textLength:
+            0
+        },
+
+        validation: {
+
+          htmlCaptured:
+            false,
+
+          textCaptured:
+            false,
+
+          valid:
+            false
+        },
+
+        error:
+          String(error)
+      };
+    }
+  }
+
+  // ==========================================================
+  // FETCH EVERY ELIGIBLE PAGE
+  // ==========================================================
+
+  const linkedPages = [];
+
+  for (
+    let i = 0;
+    i < uniqueLinks.length;
+    i++
+  ) {
+
+    const url =
+      uniqueLinks[i];
+
+    console.log("");
+
+    console.log(
+      `========== PAGE ${i + 1}/${uniqueLinks.length} ==========`
+    );
+
+    console.log(
+      url
+    );
+
+    const page =
+      await fetchFullPage(
+        url
+      );
+
+    linkedPages.push(
+      page
+    );
+
+    console.log(
+      "Status:",
+      page.fetch.status
+    );
+
+    console.log(
+      "HTML:",
+      page.content.htmlLength,
+      "chars"
+    );
+
+    console.log(
+      "Text:",
+      page.content.textLength,
+      "chars"
+    );
+
+    console.log(
+      "Valid:",
+      page.validation.valid
+    );
+
+    await sleep(250);
+  }
+
+  // ==========================================================
+  // VALIDATION
+  // ==========================================================
+
+  const pagesCaptured =
+    linkedPages.filter(
+      page =>
+        page.validation
+          ?.valid === true
+    ).length;
+
+  const pagesFailed =
+    linkedPages.filter(
+      page =>
+        page.validation
+          ?.valid !== true
+    ).length;
+
+  const pagesInvariant =
+    linkedPages.length ===
+      uniqueLinks.length &&
+    linkedPages.every(
+      page =>
+        page.validation
+          ?.valid === true &&
+        page.content
+          ?.htmlLength > 0
+    );
+
+  const overviewHTMLCaptured =
+    overviewHTML.length > 0;
+
+  const overviewTextCaptured =
+    overviewText.length > 0;
+
+  const identityValid =
+    !!TEST_ID &&
+    !!TEST_NAME;
+
+  const extractionComplete =
+    identityValid &&
+    overviewHTMLCaptured &&
+    overviewTextCaptured &&
+    pagesInvariant;
+
+  // ==========================================================
+  // FAILED PAGE REPORT
+  // ==========================================================
+
+  const failedPages =
+    linkedPages
+      .filter(
+        page =>
+          page.validation
+            ?.valid !== true
+      )
+      .map(page => ({
+        url:
+          page.url,
+
+        finalUrl:
+          page.finalUrl,
+
+        status:
+          page.fetch?.status,
+
+        statusText:
+          page.fetch?.statusText,
+
+        error:
+          page.error || null,
+
+        htmlLength:
+          page.content
+            ?.htmlLength || 0
+      }));
+
+  if (
+    failedPages.length
+  ) {
+
+    console.log("");
+
+    console.log(
+      "================ FAILED PAGE CAPTURES ================"
+    );
+
+    console.table(
+      failedPages
+    );
+
+    console.log(
+      "Full failed records:",
+      failedPages
+    );
+
+    console.log(
+      "========================================================"
+    );
+  }
+
+  // ==========================================================
+  // FINAL DATA
+  // ==========================================================
+
+  const data = {
+
+    source:
+      "Test IO",
+
+    extractorVersion:
+      VERSION,
+
+    extractionType:
+      "test-overview-full-linked-pages",
+
+    extractedAt:
+      new Date().toISOString(),
+
+    test: {
+
+      id:
+        TEST_ID,
+
+      name:
+        TEST_NAME,
+
+      url:
+        location.href
+    },
+
+    overview: {
+
+      url:
+        location.href,
+
+      title:
+        document.title,
+
+      html:
+        overviewHTML,
+
+      text:
+        overviewText,
+
+      htmlLength:
+        overviewHTML.length,
+
+      textLength:
+        overviewText.length
+    },
+
+    discoveredLinks: {
+
+      total:
+        discoveredLinks.length,
+
+      eligible:
+        uniqueLinks
+    },
+
+    linkedPages,
+
+    structured: {
+
+      headings,
+
+      links,
+
+      tables,
+
+      forms
+    },
+
+    verification: {
+
+      testIdFound:
+        !!TEST_ID,
+
+      testNameFound:
+        !!TEST_NAME,
+
+      overviewHTMLCaptured:
+        overviewHTMLCaptured,
+
+      overviewTextCaptured:
+        overviewTextCaptured,
+
+      eligibleLinks:
+        uniqueLinks.length,
+
+      pagesCaptured,
+
+      pagesFailed,
+
+      pagesInvariant,
+
+      extractionComplete
+    }
+  };
+
+  // ==========================================================
+  // DOWNLOAD
+  // ==========================================================
+
+  const json =
+    JSON.stringify(
+      data,
+      null,
+      2
+    );
+
+  const blob =
+    new Blob(
+      [json],
+      {
+        type:
+          "application/json"
+      }
+    );
+
+  const a =
+    document.createElement("a");
+
+  const objectURL =
+    URL.createObjectURL(
+      blob
+    );
+
+  a.href =
+    objectURL;
+
+  a.download =
+    OUTPUT;
+
+  document.body.appendChild(
+    a
+  );
+
+  a.click();
+
+  a.remove();
+
+  setTimeout(
+    () =>
+      URL.revokeObjectURL(
+        objectURL
+      ),
+    1000
+  );
+
+  // ==========================================================
+  // FINAL REPORT
+  // ==========================================================
+
+  console.log("");
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "TEST IO OVERVIEW EXTRACTION COMPLETE"
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "Version:",
+    VERSION
+  );
+
+  console.log(
+    "Test ID:",
+    TEST_ID
+  );
+
+  console.log(
+    "Detected name:",
+    TEST_NAME
+  );
+
+  console.log(
+    "Overview HTML:",
+    overviewHTML.length
+  );
+
+  console.log(
+    "Overview text:",
+    overviewText.length
+  );
+
+  console.log(
+    "Discovered URLs:",
+    discoveredLinks.length
+  );
+
+  console.log(
+    "Eligible links:",
+    uniqueLinks.length
+  );
+
+  console.log(
+    "Pages captured:",
+    pagesCaptured
+  );
+
+  console.log(
+    "Pages failed:",
+    pagesFailed
+  );
+
+  console.log(
+    "Pages invariant:",
+    pagesInvariant
+  );
+
+  console.log(
+    "Identity valid:",
+    identityValid
+  );
+
+  console.log(
+    "Extraction complete:",
+    extractionComplete
+  );
+
+  console.log(
+    "JSON LENGTH:",
+    json.length
+  );
+
+  console.log(
+    "DOWNLOAD:",
+    OUTPUT
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+})();

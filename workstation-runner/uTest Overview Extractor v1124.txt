@@ -1,0 +1,925 @@
+(async () => {
+  const VERSION = "v1124";
+
+  // ==========================================================
+  // AUTOMATIC CYCLE ID + NAME
+  // ==========================================================
+
+  const cycleIdMatch =
+    location.pathname.match(/\/testcycles\/(\d+)/);
+
+  const CYCLE_ID =
+    cycleIdMatch?.[1] || null;
+
+  if (!CYCLE_ID) {
+    throw new Error(
+      "Could not determine uTest Cycle ID from the current page."
+    );
+  }
+
+  function cleanText(value) {
+    return String(value || "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  function detectCycleName() {
+    const selectors = [
+      "h1",
+      "[class*='cycle-title']",
+      "[class*='CycleTitle']",
+      "[class*='test-cycle-title']",
+      "[class*='TestCycleTitle']"
+    ];
+
+    for (const selector of selectors) {
+      for (const el of document.querySelectorAll(selector)) {
+        const text =
+          cleanText(
+            el.innerText ||
+            el.textContent
+          );
+
+        if (
+          text &&
+          !/^uTest$/i.test(text) &&
+          !/^Test Cycle$/i.test(text)
+        ) {
+          return text;
+        }
+      }
+    }
+
+    const title =
+      cleanText(document.title);
+
+    if (
+      title &&
+      !/^uTest$/i.test(title)
+    ) {
+      return title;
+    }
+
+    const lines =
+      (document.body?.innerText || "")
+        .split(/\r?\n/)
+        .map(cleanText)
+        .filter(Boolean);
+
+    return (
+      lines.find(line =>
+        /uTest Academy|Test Cycle|Cycle/i.test(line)
+      ) ||
+      `uTest Cycle ${CYCLE_ID}`
+    );
+  }
+
+  const CYCLE_NAME =
+    detectCycleName();
+
+  const BASE =
+    `${location.origin}/testcycles/${CYCLE_ID}`;
+
+  // ==========================================================
+  // OUTPUT FILENAME
+  // ==========================================================
+
+  function safeFilename(text) {
+    return text
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 180);
+  }
+
+  const OUTPUT =
+    `utest-cycle-${safeFilename(CYCLE_NAME)}-overview-v1124.json`;
+
+  const sleep =
+    ms => new Promise(r => setTimeout(r, ms));
+
+  const abs = href => {
+    try {
+      return new URL(
+        href,
+        location.href
+      ).href;
+    } catch {
+      return null;
+    }
+  };
+
+  // ==========================================================
+  // LINK ELIGIBILITY
+  //
+  // Capture pages belonging to this uTest cycle.
+  // Avoid external sites, assets, mailto/javascript links, etc.
+  // ==========================================================
+
+  function isEligibleCycleLink(url) {
+    try {
+      const u =
+        new URL(url);
+
+      if (
+        u.origin !== location.origin
+      ) {
+        return false;
+      }
+
+      if (
+        !u.pathname.includes(
+          `/testcycles/${CYCLE_ID}`
+        )
+      ) {
+        return false;
+      }
+
+      if (
+        /^(mailto|javascript|tel):/i.test(
+          u.protocol
+        )
+      ) {
+        return false;
+      }
+
+      return true;
+
+    } catch {
+      return false;
+    }
+  }
+
+  // ==========================================================
+  // CAPTURE A COMPLETE HTML PAGE
+  // ==========================================================
+
+  async function fetchFullPage(url) {
+
+    try {
+
+      const response =
+        await fetch(
+          url,
+          {
+            method:
+              "GET",
+
+            credentials:
+              "include",
+
+            redirect:
+              "follow"
+          }
+        );
+
+      const html =
+        await response.text();
+
+      let text = "";
+
+      try {
+        text =
+          new DOMParser()
+            .parseFromString(
+              html,
+              "text/html"
+            )
+            .body?.innerText || "";
+      } catch {}
+
+      return {
+
+        url,
+
+        finalUrl:
+          response.url ||
+          url,
+
+        fetch: {
+
+          method:
+            "GET",
+
+          status:
+            response.status,
+
+          statusText:
+            response.statusText,
+
+          ok:
+            response.ok,
+
+          redirected:
+            response.redirected,
+
+          contentType:
+            response.headers.get(
+              "content-type"
+            ) || "",
+
+          contentLength:
+            html.length
+        },
+
+        content: {
+
+          html,
+
+          text,
+
+          htmlLength:
+            html.length,
+
+          textLength:
+            text.length
+        },
+
+        validation: {
+
+          htmlCaptured:
+            html.length > 0,
+
+          valid:
+            response.ok &&
+            html.length > 0
+        }
+      };
+
+    } catch (error) {
+
+      return {
+
+        url,
+
+        finalUrl:
+          url,
+
+        fetch: {
+
+          method:
+            "GET",
+
+          status:
+            null,
+
+          statusText:
+            null,
+
+          ok:
+            false,
+
+          redirected:
+            false,
+
+          contentType:
+            "",
+
+          contentLength:
+            0
+        },
+
+        content: {
+
+          html:
+            "",
+
+          text:
+            "",
+
+          htmlLength:
+            0,
+
+          textLength:
+            0
+        },
+
+        validation: {
+
+          htmlCaptured:
+            false,
+
+          valid:
+            false
+        },
+
+        error:
+          String(error)
+      };
+    }
+  }
+
+  console.clear();
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "uTest OVERVIEW + LINK HTML EXTRACTION — v1124"
+  );
+
+  console.log(
+    "AUTOMATIC CYCLE NAME + RECURSIVE LINK CAPTURE"
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "Cycle ID:",
+    CYCLE_ID
+  );
+
+  console.log(
+    "Cycle name:",
+    CYCLE_NAME
+  );
+
+  console.log(
+    "Current URL:",
+    location.href
+  );
+
+  console.log(
+    "Output:",
+    OUTPUT
+  );
+
+  // ==========================================================
+  // OVERVIEW PAGE
+  // ==========================================================
+
+  const overviewHTML =
+    document.documentElement.outerHTML;
+
+  const overviewText =
+    document.body?.innerText || "";
+
+  // ==========================================================
+  // DISCOVER ALL LINKS ON OVERVIEW
+  // ==========================================================
+
+  const discoveredLinks = [
+    ...new Set(
+      [...document.querySelectorAll("a[href]")]
+        .map(a =>
+          abs(
+            a.getAttribute("href")
+          )
+        )
+        .filter(Boolean)
+    )
+  ];
+
+  const cycleLinks = [
+    ...new Set(
+      discoveredLinks
+        .filter(isEligibleCycleLink)
+    )
+  ];
+
+  // Always include the current overview page.
+  if (
+    isEligibleCycleLink(location.href)
+  ) {
+    cycleLinks.unshift(
+      location.href
+    );
+  }
+
+  const uniqueCycleLinks =
+    [...new Set(cycleLinks)];
+
+  console.log(
+    "Discovered links:",
+    discoveredLinks.length
+  );
+
+  console.log(
+    "Eligible cycle links:",
+    uniqueCycleLinks.length
+  );
+
+  // ==========================================================
+  // STRUCTURED OVERVIEW INFORMATION
+  // ==========================================================
+
+  const headings = [
+    ...document.querySelectorAll(
+      "h1,h2,h3,h4,h5,h6"
+    )
+  ].map(el => ({
+    tag:
+      el.tagName,
+
+    text:
+      cleanText(el.innerText),
+
+    html:
+      el.outerHTML
+  }));
+
+  const tables = [
+    ...document.querySelectorAll("table")
+  ].map((table, index) => ({
+    index,
+
+    html:
+      table.outerHTML,
+
+    text:
+      table.innerText || ""
+  }));
+
+  const links = [
+    ...document.querySelectorAll("a[href]")
+  ].map(a => ({
+    text:
+      cleanText(a.innerText),
+
+    href:
+      a.href || "",
+
+    eligibleCycleLink:
+      isEligibleCycleLink(
+        a.href || ""
+      ),
+
+    html:
+      a.outerHTML
+  }));
+
+  const inputs = [
+    ...document.querySelectorAll(
+      "input,textarea,select,button"
+    )
+  ].map(el => ({
+    tag:
+      el.tagName,
+
+    type:
+      el.getAttribute("type"),
+
+    name:
+      el.getAttribute("name"),
+
+    id:
+      el.id || "",
+
+    value:
+      el.value || "",
+
+    text:
+      cleanText(el.innerText),
+
+    ariaLabel:
+      el.getAttribute("aria-label") || "",
+
+    html:
+      el.outerHTML
+  }));
+
+  const overviewCandidates = [
+    ...document.querySelectorAll(
+      "[class*='overview'], " +
+      "[class*='Overview'], " +
+      "[id*='overview'], " +
+      "[id*='Overview'], " +
+      "[class*='cycle-info'], " +
+      "[class*='CycleInfo']"
+    )
+  ];
+
+  const overviewBlocks = [
+    ...new Set(
+      overviewCandidates
+        .map(el => el.outerHTML)
+        .filter(Boolean)
+    )
+  ];
+
+  // ==========================================================
+  // API REFERENCES
+  // ==========================================================
+
+  const apiReferences = [
+    ...new Set(
+      (
+        overviewHTML.match(
+          /https?:\/\/[^"'<>\\\s]+/g
+        ) || []
+      )
+        .filter(url =>
+          /api|testcycle|testcycles/i.test(url)
+        )
+    )
+  ];
+
+  // ==========================================================
+  // FETCH EVERY ELIGIBLE LINK
+  // ==========================================================
+
+  const linkedPages = [];
+
+  for (
+    let i = 0;
+    i < uniqueCycleLinks.length;
+    i++
+  ) {
+
+    const url =
+      uniqueCycleLinks[i];
+
+    console.log("");
+
+    console.log(
+      `========== LINK ${i + 1}/${uniqueCycleLinks.length} ==========`
+    );
+
+    console.log(
+      url
+    );
+
+    const page =
+      await fetchFullPage(
+        url
+      );
+
+    linkedPages.push(
+      page
+    );
+
+    console.log(
+      "Status:",
+      page.fetch.status
+    );
+
+    console.log(
+      "HTML:",
+      page.content.htmlLength,
+      "chars"
+    );
+
+    console.log(
+      "Valid:",
+      page.validation.valid
+    );
+
+    await sleep(250);
+  }
+
+  // ==========================================================
+  // LINK VALIDATION
+  // ==========================================================
+
+  const linksCaptured =
+    linkedPages.filter(
+      page =>
+        page.validation
+          ?.valid === true
+    ).length;
+
+  const linksFailed =
+    linkedPages.filter(
+      page =>
+        page.validation
+          ?.valid !== true
+    ).length;
+
+  const linksInvariant =
+    linkedPages.length ===
+      uniqueCycleLinks.length &&
+    linkedPages.every(
+      page =>
+        page.validation
+          ?.valid === true &&
+        page.content
+          ?.htmlLength > 0
+    );
+
+  // ==========================================================
+  // OVERVIEW VALIDATION
+  // ==========================================================
+
+  const overviewCaptured =
+    overviewHTML.length > 0;
+
+  const overviewTextCaptured =
+    overviewText.length > 0;
+
+  const cycleIdentityValid =
+    !!CYCLE_ID &&
+    !!CYCLE_NAME;
+
+  const extractionComplete =
+    cycleIdentityValid &&
+    overviewCaptured &&
+    overviewTextCaptured &&
+    linksInvariant;
+
+  // ==========================================================
+  // FAILED LINK REPORT
+  // ==========================================================
+
+  const failedLinks =
+    linkedPages
+      .filter(
+        page =>
+          page.validation
+            ?.valid !== true
+      )
+      .map(page => ({
+        url:
+          page.url,
+
+        finalUrl:
+          page.finalUrl,
+
+        status:
+          page.fetch?.status,
+
+        statusText:
+          page.fetch?.statusText,
+
+        error:
+          page.error || null,
+
+        htmlLength:
+          page.content
+            ?.htmlLength || 0
+      }));
+
+  if (
+    failedLinks.length
+  ) {
+
+    console.log("");
+
+    console.log(
+      "================ FAILED LINK CAPTURES ================"
+    );
+
+    console.table(
+      failedLinks
+    );
+
+    console.log(
+      "========================================================"
+    );
+  }
+
+  // ==========================================================
+  // FINAL DATA OBJECT
+  // ==========================================================
+
+  const data = {
+
+    source:
+      "uTest",
+
+    extractorVersion:
+      VERSION,
+
+    extractionType:
+      "cycle-overview-full-linked-pages",
+
+    extractedAt:
+      new Date().toISOString(),
+
+    cycle: {
+
+      id:
+        CYCLE_ID,
+
+      name:
+        CYCLE_NAME,
+
+      url:
+        BASE
+    },
+
+    overview: {
+
+      url:
+        location.href,
+
+      title:
+        document.title,
+
+      html:
+        overviewHTML,
+
+      text:
+        overviewText,
+
+      htmlLength:
+        overviewHTML.length,
+
+      textLength:
+        overviewText.length
+    },
+
+    discoveredLinks: {
+
+      total:
+        discoveredLinks.length,
+
+      eligibleCycleLinks:
+        uniqueCycleLinks
+    },
+
+    linkedPages,
+
+    structured: {
+
+      headings,
+
+      tables,
+
+      links,
+
+      inputs,
+
+      overviewBlocks,
+
+      apiReferences
+    },
+
+    verification: {
+
+      cycleIdFound:
+        !!CYCLE_ID,
+
+      cycleNameFound:
+        !!CYCLE_NAME,
+
+      overviewHTMLCaptured:
+        overviewCaptured,
+
+      overviewTextCaptured:
+        overviewTextCaptured,
+
+      linksDiscovered:
+        uniqueCycleLinks.length,
+
+      linksCaptured,
+
+      linksFailed,
+
+      linksInvariant,
+
+      extractionComplete
+    }
+  };
+
+  // ==========================================================
+  // DOWNLOAD
+  // ==========================================================
+
+  const json =
+    JSON.stringify(
+      data,
+      null,
+      2
+    );
+
+  const blob =
+    new Blob(
+      [json],
+      {
+        type:
+          "application/json"
+      }
+    );
+
+  const a =
+    document.createElement("a");
+
+  const objectURL =
+    URL.createObjectURL(
+      blob
+    );
+
+  a.href =
+    objectURL;
+
+  a.download =
+    OUTPUT;
+
+  document.body.appendChild(
+    a
+  );
+
+  a.click();
+
+  a.remove();
+
+  setTimeout(
+    () =>
+      URL.revokeObjectURL(
+        objectURL
+      ),
+    1000
+  );
+
+  // ==========================================================
+  // FINAL REPORT
+  // ==========================================================
+
+  console.log("");
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "uTest OVERVIEW + LINK HTML EXTRACTION COMPLETE"
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "Version:",
+    VERSION
+  );
+
+  console.log(
+    "Cycle:",
+    CYCLE_NAME
+  );
+
+  console.log(
+    "Cycle ID:",
+    CYCLE_ID
+  );
+
+  console.log(
+    "Overview URL:",
+    location.href
+  );
+
+  console.log(
+    "Overview HTML:",
+    overviewHTML.length
+  );
+
+  console.log(
+    "Overview text:",
+    overviewText.length
+  );
+
+  console.log(
+    "Discovered links:",
+    discoveredLinks.length
+  );
+
+  console.log(
+    "Eligible cycle links:",
+    uniqueCycleLinks.length
+  );
+
+  console.log(
+    "Linked pages captured:",
+    linksCaptured
+  );
+
+  console.log(
+    "Linked pages failed:",
+    linksFailed
+  );
+
+  console.log(
+    "Links invariant:",
+    linksInvariant
+  );
+
+  console.log(
+    "Cycle identity valid:",
+    cycleIdentityValid
+  );
+
+  console.log(
+    "Extraction complete:",
+    extractionComplete
+  );
+
+  console.log(
+    "JSON LENGTH:",
+    json.length
+  );
+
+  console.log(
+    "DOWNLOAD:",
+    OUTPUT
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+})();

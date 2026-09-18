@@ -1,0 +1,1244 @@
+(async () => {
+  const VERSION = "v1124";
+  const CURRENT_URL = location.href;
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+  console.clear();
+
+  console.log("============================================================");
+  console.log("TEST IO CHAT EXTRACTION — v1124");
+  console.log("CYCLE-NAME AWARE");
+  console.log("============================================================");
+
+  // ==========================================================
+  // HELPERS
+  // ==========================================================
+
+  const clean = v =>
+    String(v ?? "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const abs = href => {
+    try {
+      return new URL(href, location.href).href;
+    } catch {
+      return null;
+    }
+  };
+
+  const parseJSON = value => {
+    if (typeof value !== "string") return null;
+
+    try {
+      return JSON.parse(value);
+    } catch {}
+
+    try {
+      return JSON.parse(
+        value
+          .replace(/&quot;/g, '"')
+          .replace(/&#39;/g, "'")
+          .replace(/&amp;/g, "&")
+      );
+    } catch {}
+
+    return null;
+  };
+
+  // ==========================================================
+  // TEST / CYCLE ID
+  // ==========================================================
+
+  const testMatch =
+    CURRENT_URL.match(/\/tests\/([^/?#]+)/);
+
+  const TEST_ID =
+    testMatch?.[1] || null;
+
+  if (!TEST_ID) {
+    throw new Error(
+      "Could not determine Test IO test ID from the Chat URL."
+    );
+  }
+
+  // ==========================================================
+  // CYCLE NAME
+  //
+  // IMPORTANT:
+  // Do NOT use document.title.
+  // Do NOT use Chat as the name.
+  // Do NOT guess.
+  //
+  // The cycle name is expected to exist on the page.
+  // ==========================================================
+
+  function findCycleName() {
+
+    const selectors = [
+      "[data-cycle-name]",
+      "[data-test-cycle-name]",
+      "[data-testid='cycle-name']",
+      "[data-testid*='cycle-name']",
+      "[class*='cycle-name']",
+      "[class*='CycleName']",
+      "[class*='cycleName']",
+      "[id*='cycle-name']",
+      "[id*='CycleName']"
+    ];
+
+    for (const selector of selectors) {
+
+      for (const el of document.querySelectorAll(selector)) {
+
+        const values = [
+          el.getAttribute("data-cycle-name"),
+          el.getAttribute("data-test-cycle-name"),
+          el.getAttribute("aria-label"),
+          el.innerText,
+          el.textContent
+        ];
+
+        for (const value of values) {
+
+          const text = clean(value);
+
+          if (
+            text &&
+            text.length > 2 &&
+            !/^(chat|communication)$/i.test(text)
+          ) {
+            return text;
+          }
+        }
+      }
+    }
+
+    // --------------------------------------------------------
+    // Search links / elements containing the test-cycle context
+    // --------------------------------------------------------
+
+    const elements = [
+      ...document.querySelectorAll(
+        "a[href], button, [role='link'], h1, h2, h3, h4, h5, h6"
+      )
+    ];
+
+    for (const el of elements) {
+
+      const href =
+        el.getAttribute("href") || "";
+
+      const text =
+        clean(
+          el.innerText ||
+          el.textContent
+        );
+
+      if (
+        !text ||
+        text.length < 3
+      ) {
+        continue;
+      }
+
+      if (
+        /\/tests\/[^/]+/i.test(href) ||
+        /cycle/i.test(text)
+      ) {
+
+        if (
+          !/^(chat|communication|messages?)$/i.test(text) &&
+          text.length > 5
+        ) {
+          return text;
+        }
+      }
+    }
+
+    // --------------------------------------------------------
+    // Search embedded HTML attributes / JSON for cycle name.
+    // --------------------------------------------------------
+
+    const html =
+      document.documentElement.outerHTML;
+
+    const patterns = [
+      /data-cycle-name=["']([^"']+)["']/i,
+      /data-test-cycle-name=["']([^"']+)["']/i,
+      /"cycleName"\s*:\s*"([^"]+)"/i,
+      /"cycle_name"\s*:\s*"([^"]+)"/i,
+      /"testCycleName"\s*:\s*"([^"]+)"/i,
+      /"test_cycle_name"\s*:\s*"([^"]+)"/i
+    ];
+
+    for (const pattern of patterns) {
+
+      const match =
+        html.match(pattern);
+
+      if (match?.[1]) {
+
+        const text =
+          clean(
+            match[1]
+          );
+
+        if (
+          text &&
+          !/^(chat|communication)$/i.test(text)
+        ) {
+          return text;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  const CYCLE_NAME =
+    findCycleName();
+
+  if (!CYCLE_NAME) {
+
+    console.error(
+      "CYCLE NAME NOT FOUND — EXTRACTION STOPPED"
+    );
+
+    throw new Error(
+      "Cycle name could not be established from the current Test IO Chat page. No incorrect filename will be generated."
+    );
+  }
+
+  // ==========================================================
+  // FILENAME
+  // ==========================================================
+
+  const safeFilename = text =>
+    String(text)
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
+      .replace(/\s+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "")
+      .slice(0, 180);
+
+  const OUTPUT =
+    `testio-${safeFilename(CYCLE_NAME)}-chat-v1124.json`;
+
+  console.log(
+    "Test ID:",
+    TEST_ID
+  );
+
+  console.log(
+    "Cycle name:",
+    CYCLE_NAME
+  );
+
+  console.log(
+    "Output:",
+    OUTPUT
+  );
+
+  // ==========================================================
+  // FULL CURRENT PAGE
+  // ==========================================================
+
+  const pageHTML =
+    document.documentElement.outerHTML;
+
+  const pageText =
+    document.body?.innerText || "";
+
+  // ==========================================================
+  // data-messages
+  // ==========================================================
+
+  const messageNodes =
+    [
+      ...document.querySelectorAll(
+        "[data-messages]"
+      )
+    ];
+
+  console.log(
+    "data-messages nodes:",
+    messageNodes.length
+  );
+
+  let embeddedMessages = [];
+  let embeddedExpectedCount = null;
+  let embeddedRaw = null;
+
+  for (const node of messageNodes) {
+
+    const raw =
+      node.getAttribute(
+        "data-messages"
+      );
+
+    if (!raw) continue;
+
+    const payload =
+      parseJSON(raw);
+
+    if (!payload) continue;
+
+    let messages = null;
+
+    if (Array.isArray(payload)) {
+      messages = payload;
+    } else if (Array.isArray(payload.data)) {
+      messages = payload.data;
+    } else if (Array.isArray(payload.messages)) {
+      messages = payload.messages;
+    } else if (Array.isArray(payload.items)) {
+      messages = payload.items;
+    }
+
+    if (messages) {
+
+      embeddedMessages =
+        messages;
+
+      embeddedRaw =
+        raw;
+
+      break;
+    }
+  }
+
+  const countValues =
+    messageNodes
+      .map(
+        node =>
+          Number(
+            node.getAttribute(
+              "data-messages-count"
+            )
+          )
+      )
+      .filter(
+        Number.isFinite
+      );
+
+  if (countValues.length) {
+    embeddedExpectedCount =
+      Math.max(...countValues);
+  }
+
+  console.log(
+    "Initial embedded messages:",
+    embeddedMessages.length
+  );
+
+  console.log(
+    "Expected messages:",
+    embeddedExpectedCount
+  );
+
+  // ==========================================================
+  // MESSAGE DEDUPLICATION
+  // ==========================================================
+
+  const messages = [];
+  const seen = new Set();
+
+  function keyFor(message) {
+
+    if (!message || typeof message !== "object") {
+      return null;
+    }
+
+    const id =
+      message.id ??
+      message.message_id ??
+      message.messageId ??
+      null;
+
+    if (id !== null) {
+      return `id:${id}`;
+    }
+
+    const uuid =
+      message.uuid ??
+      message.uid ??
+      null;
+
+    if (uuid !== null) {
+      return `uuid:${uuid}`;
+    }
+
+    return [
+      message.created_at ??
+      message.createdAt ??
+      message.timestamp ??
+      "",
+
+      message.user_id ??
+      message.userId ??
+      "",
+
+      message.body ??
+      message.text ??
+      message.message ??
+      ""
+    ].join("|");
+  }
+
+  function addMessages(items) {
+
+    if (!Array.isArray(items)) {
+      return 0;
+    }
+
+    let added = 0;
+
+    for (const message of items) {
+
+      const key =
+        keyFor(message);
+
+      if (
+        !key ||
+        seen.has(key)
+      ) {
+        continue;
+      }
+
+      seen.add(key);
+      messages.push(message);
+      added++;
+    }
+
+    return added;
+  }
+
+  addMessages(
+    embeddedMessages
+  );
+
+  // ==========================================================
+  // DISCOVER MESSAGE API
+  // ==========================================================
+
+  const hrefURLs = [
+    ...new Set(
+      [
+        ...document.querySelectorAll(
+          "a[href]"
+        )
+      ]
+        .map(
+          a =>
+            abs(
+              a.getAttribute(
+                "href"
+              )
+            )
+        )
+        .filter(Boolean)
+    )
+  ];
+
+  const resourceURLs = [
+    ...new Set(
+      performance
+        .getEntriesByType(
+          "resource"
+        )
+        .map(
+          x => x.name
+        )
+        .filter(Boolean)
+    )
+  ];
+
+  const messageURLs = [
+    ...new Set([
+      ...hrefURLs.filter(
+        url =>
+          /chat_messages|\/messages(?:\?|\/|$)/i.test(url)
+      ),
+      ...resourceURLs.filter(
+        url =>
+          /chat_messages|\/messages(?:\?|\/|$)/i.test(url)
+      )
+    ])
+  ];
+
+  console.log(
+    "Message-related URLs:",
+    messageURLs.length
+  );
+
+  console.table(
+    messageURLs.map(
+      url => ({ url })
+    )
+  );
+
+  // ==========================================================
+  // PAYLOAD MESSAGE EXTRACTION
+  // ==========================================================
+
+  function extractMessages(payload) {
+
+    if (Array.isArray(payload)) {
+      return payload;
+    }
+
+    if (
+      !payload ||
+      typeof payload !== "object"
+    ) {
+      return null;
+    }
+
+    const direct = [
+      payload.data,
+      payload.messages,
+      payload.items,
+      payload.results,
+      payload.chat_messages,
+      payload.chatMessages
+    ];
+
+    for (const candidate of direct) {
+
+      if (
+        Array.isArray(candidate)
+      ) {
+        return candidate;
+      }
+    }
+
+    for (
+      const value of Object.values(payload)
+    ) {
+
+      if (
+        value &&
+        typeof value === "object"
+      ) {
+
+        const nested =
+          extractMessages(
+            value
+          );
+
+        if (nested) {
+          return nested;
+        }
+      }
+    }
+
+    return null;
+  }
+
+  // ==========================================================
+  // FETCH API
+  // ==========================================================
+
+  async function fetchAPI(url) {
+
+    try {
+
+      const response =
+        await fetch(
+          url,
+          {
+            method: "GET",
+            credentials: "include",
+            redirect: "follow",
+            headers: {
+              accept:
+                "application/json, text/plain, */*"
+            }
+          }
+        );
+
+      const raw =
+        await response.text();
+
+      let payload = null;
+      let jsonParsed = false;
+
+      try {
+
+        payload =
+          JSON.parse(raw);
+
+        jsonParsed =
+          true;
+
+      } catch {}
+
+      const batch =
+        extractMessages(
+          payload
+        ) || [];
+
+      return {
+
+        url,
+
+        finalUrl:
+          response.url || url,
+
+        fetch: {
+
+          method: "GET",
+          status: response.status,
+          statusText: response.statusText,
+          ok: response.ok,
+          redirected: response.redirected,
+
+          contentType:
+            response.headers.get(
+              "content-type"
+            ) || "",
+
+          contentLength:
+            raw.length
+        },
+
+        raw,
+
+        payload,
+
+        jsonParsed,
+
+        messages:
+          batch,
+
+        count:
+          batch.length
+      };
+
+    } catch (error) {
+
+      return {
+
+        url,
+
+        finalUrl:
+          url,
+
+        fetch: {
+
+          method: "GET",
+          status: null,
+          statusText: null,
+          ok: false,
+          redirected: false,
+          contentType: "",
+          contentLength: 0
+        },
+
+        raw: "",
+        payload: null,
+        jsonParsed: false,
+        messages: [],
+        count: 0,
+
+        error:
+          String(error)
+      };
+    }
+  }
+
+  // ==========================================================
+  // API CALLS
+  // ==========================================================
+
+  const apiResponses = [];
+
+  for (
+    const url of messageURLs
+  ) {
+
+    console.log(
+      "FETCH MESSAGE SOURCE:",
+      url
+    );
+
+    const result =
+      await fetchAPI(
+        url
+      );
+
+    apiResponses.push(
+      result
+    );
+
+    const added =
+      addMessages(
+        result.messages
+      );
+
+    console.log(
+      "Status:",
+      result.fetch.status
+    );
+
+    console.log(
+      "Batch messages:",
+      result.count
+    );
+
+    console.log(
+      "New unique messages:",
+      added
+    );
+
+    await sleep(250);
+  }
+
+  // ==========================================================
+  // PAGINATION
+  // ==========================================================
+
+  const chatBase =
+    messageURLs.find(
+      url =>
+        /\/chat_messages(?:\?|$)/i.test(url)
+    );
+
+  const paginationURLs =
+    new Set();
+
+  let paginationCalls = 0;
+
+  function numericIDs() {
+
+    return messages
+      .map(
+        message =>
+          Number(
+            message.id ??
+            message.message_id ??
+            message.messageId
+          )
+      )
+      .filter(
+        Number.isFinite
+      );
+  }
+
+  while (
+    chatBase &&
+    paginationCalls < 50
+  ) {
+
+    if (
+      embeddedExpectedCount !== null &&
+      messages.length >=
+        embeddedExpectedCount
+    ) {
+      break;
+    }
+
+    const ids =
+      numericIDs();
+
+    if (!ids.length) {
+      break;
+    }
+
+    const lastID =
+      Math.min(
+        ...ids
+      );
+
+    let nextURL;
+
+    try {
+
+      const u =
+        new URL(
+          chatBase,
+          location.href
+        );
+
+      u.searchParams.set(
+        "last_id",
+        String(lastID)
+      );
+
+      nextURL =
+        u.href;
+
+    } catch {
+      break;
+    }
+
+    if (
+      paginationURLs.has(
+        nextURL
+      )
+    ) {
+      break;
+    }
+
+    paginationURLs.add(
+      nextURL
+    );
+
+    paginationCalls++;
+
+    console.log(
+      `FETCH MESSAGE BATCH ${paginationCalls}:`,
+      nextURL
+    );
+
+    const result =
+      await fetchAPI(
+        nextURL
+      );
+
+    apiResponses.push(
+      result
+    );
+
+    const added =
+      addMessages(
+        result.messages
+      );
+
+    console.log(
+      "Status:",
+      result.fetch.status
+    );
+
+    console.log(
+      "Batch messages:",
+      result.count
+    );
+
+    console.log(
+      "New unique messages:",
+      added
+    );
+
+    if (
+      !result.messages.length ||
+      added === 0
+    ) {
+      break;
+    }
+
+    await sleep(250);
+  }
+
+  // ==========================================================
+  // STABLE ORDER
+  // ==========================================================
+
+  messages.sort(
+    (a, b) => {
+
+      const aid =
+        Number(
+          a.id ??
+          a.message_id ??
+          a.messageId
+        );
+
+      const bid =
+        Number(
+          b.id ??
+          b.message_id ??
+          b.messageId
+        );
+
+      if (
+        Number.isFinite(aid) &&
+        Number.isFinite(bid)
+      ) {
+        return aid - bid;
+      }
+
+      const at =
+        Date.parse(
+          a.created_at ??
+          a.createdAt ??
+          a.timestamp ??
+          ""
+        );
+
+      const bt =
+        Date.parse(
+          b.created_at ??
+          b.createdAt ??
+          b.timestamp ??
+          ""
+        );
+
+      if (
+        Number.isFinite(at) &&
+        Number.isFinite(bt)
+      ) {
+        return at - bt;
+      }
+
+      return 0;
+    }
+  );
+
+  // ==========================================================
+  // VALIDATION
+  // ==========================================================
+
+  const parsedCount =
+    messages.length;
+
+  let countMatch = null;
+  let validationStatus;
+  let validationReason;
+
+  if (
+    embeddedExpectedCount !== null
+  ) {
+
+    countMatch =
+      parsedCount ===
+      embeddedExpectedCount;
+
+    validationStatus =
+      countMatch
+        ? "PASS"
+        : "FAIL";
+
+    validationReason =
+      countMatch
+        ? `Captured ${parsedCount} unique messages, matching the authoritative page count of ${embeddedExpectedCount}.`
+        : `Captured ${parsedCount} unique messages, but the page reports ${embeddedExpectedCount}.`;
+
+  } else {
+
+    validationStatus =
+      parsedCount > 0
+        ? "PASS"
+        : "UNVERIFIED";
+
+    validationReason =
+      parsedCount > 0
+        ? `Captured ${parsedCount} unique messages; no authoritative count was exposed.`
+        : "No messages captured.";
+  }
+
+  const apiFound =
+    apiResponses.some(
+      response =>
+        response.fetch?.ok === true &&
+        response.jsonParsed === true &&
+        response.count > 0
+    );
+
+  const htmlCaptured =
+    pageHTML.length > 0;
+
+  const textCaptured =
+    pageText.length > 0;
+
+  const extractionComplete =
+    htmlCaptured &&
+    textCaptured &&
+    parsedCount > 0 &&
+    (
+      embeddedExpectedCount === null ||
+      countMatch === true
+    );
+
+  // ==========================================================
+  // FINAL DATA
+  // ==========================================================
+
+  const data = {
+
+    source:
+      "Test IO",
+
+    extractorVersion:
+      VERSION,
+
+    extractionType:
+      "chat-full-page-message-api-pagination",
+
+    extractedAt:
+      new Date().toISOString(),
+
+    cycle: {
+
+      id:
+        TEST_ID,
+
+      name:
+        CYCLE_NAME
+    },
+
+    page: {
+
+      url:
+        CURRENT_URL,
+
+      title:
+        document.title,
+
+      html:
+        pageHTML,
+
+      text:
+        pageText,
+
+      htmlLength:
+        pageHTML.length,
+
+      textLength:
+        pageText.length
+    },
+
+    embedded: {
+
+      dataMessagesNodes:
+        messageNodes.length,
+
+      raw:
+        embeddedRaw,
+
+      expectedCount:
+        embeddedExpectedCount,
+
+      initialMessages:
+        embeddedMessages,
+
+      initialCount:
+        embeddedMessages.length
+    },
+
+    discovery: {
+
+      hrefURLs,
+
+      resourceURLs,
+
+      messageURLs
+    },
+
+    api: {
+
+      found:
+        apiFound,
+
+      paginationCalls,
+
+      paginationURLs:
+        [...paginationURLs],
+
+      responses:
+        apiResponses
+    },
+
+    messages: {
+
+      items:
+        messages,
+
+      count:
+        parsedCount
+    },
+
+    verification: {
+
+      cycleNameFound:
+        !!CYCLE_NAME,
+
+      htmlCaptured,
+
+      textCaptured,
+
+      apiFound,
+
+      embeddedExpectedCount,
+
+      parsedMessageCount:
+        parsedCount,
+
+      countMatch,
+
+      validationStatus,
+
+      validationReason,
+
+      extractionComplete
+    }
+  };
+
+  // ==========================================================
+  // DOWNLOAD
+  // ==========================================================
+
+  const json =
+    JSON.stringify(
+      data,
+      null,
+      2
+    );
+
+  const blob =
+    new Blob(
+      [json],
+      {
+        type:
+          "application/json"
+      }
+    );
+
+  const a =
+    document.createElement(
+      "a"
+    );
+
+  const objectURL =
+    URL.createObjectURL(
+      blob
+    );
+
+  a.href =
+    objectURL;
+
+  a.download =
+    OUTPUT;
+
+  document.body.appendChild(
+    a
+  );
+
+  a.click();
+
+  a.remove();
+
+  setTimeout(
+    () =>
+      URL.revokeObjectURL(
+        objectURL
+      ),
+    1000
+  );
+
+  // ==========================================================
+  // FINAL REPORT
+  // ==========================================================
+
+  console.log("");
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "TEST IO CHAT EXTRACTION COMPLETE"
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+  console.log(
+    "Version:",
+    VERSION
+  );
+
+  console.log(
+    "Test ID:",
+    TEST_ID
+  );
+
+  console.log(
+    "Cycle:",
+    CYCLE_NAME
+  );
+
+  console.log(
+    "URL:",
+    CURRENT_URL
+  );
+
+  console.log(
+    "data-messages nodes:",
+    messageNodes.length
+  );
+
+  console.log(
+    "Initial embedded messages:",
+    embeddedMessages.length
+  );
+
+  console.log(
+    "Message API:",
+    apiFound
+      ? "FOUND"
+      : "NOT FOUND"
+  );
+
+  console.log(
+    "API calls:",
+    apiResponses.length
+  );
+
+  console.log(
+    "Pagination calls:",
+    paginationCalls
+  );
+
+  console.log(
+    "Expected messages:",
+    embeddedExpectedCount
+  );
+
+  console.log(
+    "Total unique messages:",
+    parsedCount
+  );
+
+  console.log(
+    "Count match:",
+    countMatch
+  );
+
+  console.log(
+    "Message validation:",
+    validationStatus
+  );
+
+  console.log(
+    "HTML captured:",
+    htmlCaptured
+  );
+
+  console.log(
+    "Text captured:",
+    textCaptured
+  );
+
+  console.log(
+    "Extraction complete:",
+    extractionComplete
+  );
+
+  console.log(
+    "JSON LENGTH:",
+    json.length
+  );
+
+  console.log(
+    "DOWNLOAD:",
+    OUTPUT
+  );
+
+  console.log(
+    "============================================================"
+  );
+
+})();

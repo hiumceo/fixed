@@ -1,0 +1,473 @@
+(async () => {
+  const VERSION = "v1124";
+
+  const clean = value =>
+    String(value ?? "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\r/g, "")
+      .replace(/[ \t]+/g, " ")
+      .trim();
+
+  const safeFilename = value =>
+    clean(value)
+      .replace(/[<>:"/\\|?*\x00-\x1F]/g, "")
+      .replace(/\s+/g, "-")
+      .slice(0, 100) || "Article";
+
+
+  // ============================================================
+  // ARTICLE ROOT
+  // ============================================================
+
+  const article = document.querySelector("article");
+
+  if (!article) {
+    throw new Error(
+      "Test IO Academy article root was not found."
+    );
+  }
+
+  // ============================================================
+  // HEADINGS
+  // ============================================================
+
+  const isHeadingBlock = element =>
+    element?.matches?.(
+      ".intercom-interblocks-heading"
+    ) &&
+    !!element.querySelector(
+      "h1,h2,h3,h4,h5,h6"
+    );
+
+  const getHeading = block =>
+    block.querySelector(
+      "h1,h2,h3,h4,h5,h6"
+    );
+
+  const headingBlocks = [
+    ...article.children
+  ].filter(isHeadingBlock);
+
+  const headings = headingBlocks.map(
+    block => {
+      const heading = getHeading(block);
+
+      return {
+        block,
+        text: clean(
+          heading?.innerText ||
+          heading?.textContent
+        ),
+        tag:
+          heading?.tagName?.toLowerCase() ||
+          "h1",
+        id: heading?.id || ""
+      };
+    }
+  );
+
+  // ============================================================
+  // LIST BLOCKS
+  // ============================================================
+
+  const isUnorderedListBlock = element =>
+    element?.matches?.(
+      ".intercom-interblocks-unordered-nested-list"
+    );
+
+  const isOrderedListBlock = element =>
+    element?.matches?.(
+      ".intercom-interblocks-ordered-nested-list"
+    );
+
+  const isListBlock = element =>
+    isUnorderedListBlock(element) ||
+    isOrderedListBlock(element);
+
+  const getActualList = wrapper => {
+    if (!wrapper) return null;
+
+    if (
+      wrapper.tagName === "UL" ||
+      wrapper.tagName === "OL"
+    ) {
+      return wrapper;
+    }
+
+    return wrapper.querySelector("ul,ol");
+  };
+
+  // ============================================================
+  // LIST ITEM TEXT
+  // ============================================================
+
+  const getOwnItemText = li => {
+    const clone = li.cloneNode(true);
+
+    clone
+      .querySelectorAll(
+        ".intercom-interblocks-unordered-nested-list," +
+        ".intercom-interblocks-ordered-nested-list," +
+        "ul,ol"
+      )
+      .forEach(nested => nested.remove());
+
+    return clean(
+      clone.innerText ||
+      clone.textContent
+    );
+  };
+
+  // ============================================================
+  // NESTED LIST SERIALIZER
+  // ============================================================
+
+  const serializeList = (
+    listOrWrapper,
+    depth = 0
+  ) => {
+    const actualList =
+      getActualList(listOrWrapper);
+
+    if (!actualList) return [];
+
+    const ordered =
+      actualList.tagName === "OL";
+
+    const items = [
+      ...actualList.children
+    ].filter(
+      child =>
+        child.tagName === "LI"
+    );
+
+    const lines = [];
+
+    items.forEach((li, index) => {
+      const text =
+        getOwnItemText(li);
+
+      const prefix = ordered
+        ? `${index + 1}.`
+        : "-";
+
+      if (text) {
+        lines.push(
+          `${"  ".repeat(depth)}${prefix} ${text}`
+        );
+      }
+
+      // Test IO's nested list is wrapped in another
+      // Intercom nested-list DIV rather than being
+      // a raw UL/OL child of the parent LI.
+      const nestedIntercomLists = [
+        ...li.children
+      ].filter(
+        child =>
+          isUnorderedListBlock(child) ||
+          isOrderedListBlock(child)
+      );
+
+      nestedIntercomLists.forEach(
+        nested =>
+          lines.push(
+            ...serializeList(
+              nested,
+              depth + 1
+            )
+          )
+      );
+
+      // Also support raw UL/OL nesting.
+      const nestedRawLists = [
+        ...li.children
+      ].filter(
+        child =>
+          (
+            child.tagName === "UL" ||
+            child.tagName === "OL"
+          ) &&
+          !nestedIntercomLists.includes(child)
+      );
+
+      nestedRawLists.forEach(
+        nested =>
+          lines.push(
+            ...serializeList(
+              nested,
+              depth + 1
+            )
+          )
+      );
+    });
+
+    return lines;
+  };
+
+  // ============================================================
+  // BLOCK SERIALIZER
+  // ============================================================
+
+  const serializeBlock = block => {
+    if (!block) return [];
+
+    // Never include the related-article UI.
+    if (
+      block.matches?.(
+        "section.related_articles"
+      ) ||
+      block.closest?.(
+        "section.related_articles"
+      )
+    ) {
+      return [];
+    }
+
+    // Heading blocks are section boundaries.
+    if (isHeadingBlock(block)) {
+      return [];
+    }
+
+    // Ordered/unordered Intercom lists.
+    if (isListBlock(block)) {
+      return serializeList(block);
+    }
+
+    // Images.
+    if (
+      block.matches?.(
+        ".intercom-interblocks-image"
+      )
+    ) {
+      const img =
+        block.querySelector("img");
+
+      if (!img) return [];
+
+      const alt =
+        clean(
+          img.getAttribute("alt")
+        );
+
+      const src =
+        img.currentSrc ||
+        img.getAttribute("src") ||
+        "";
+
+      return [
+        `[IMAGE${alt ? `: ${alt}` : ""}]`,
+        src
+          ? `URL: ${src}`
+          : ""
+      ].filter(Boolean);
+    }
+
+    // Callouts.
+    if (
+      block.matches?.(
+        ".intercom-interblocks-callout"
+      )
+    ) {
+      const text =
+        clean(block.innerText);
+
+      return text
+        ? text
+            .split("\n")
+            .map(clean)
+            .filter(Boolean)
+            .map(
+              line => `> ${line}`
+            )
+        : [];
+    }
+
+    // Paragraphs.
+    if (
+      block.matches?.(
+        ".intercom-interblocks-paragraph"
+      )
+    ) {
+      const text =
+        clean(block.innerText);
+
+      return text
+        ? [text]
+        : [];
+    }
+
+    // Generic Intercom content block.
+    const text =
+      clean(block.innerText);
+
+    return text
+      ? [text]
+      : [];
+  };
+
+  // ============================================================
+  // SECTION EXTRACTION
+  // ============================================================
+
+  const articleChildren = [
+    ...article.children
+  ];
+
+  const sections = [];
+
+  headings.forEach(
+    (headingInfo, index) => {
+      const startIndex =
+        articleChildren.indexOf(
+          headingInfo.block
+        );
+
+      const nextHeading =
+        headings[index + 1];
+
+      const endIndex =
+        nextHeading
+          ? articleChildren.indexOf(
+              nextHeading.block
+            )
+          : articleChildren.length;
+
+      const blocks =
+        articleChildren.slice(
+          startIndex + 1,
+          endIndex
+        );
+
+      const lines = [];
+
+      for (const block of blocks) {
+        if (
+          block.matches?.(
+            "section.related_articles"
+          ) ||
+          block.closest?.(
+            "section.related_articles"
+          )
+        ) {
+          continue;
+        }
+
+        lines.push(
+          ...serializeBlock(block)
+        );
+      }
+
+      sections.push({
+        heading: headingInfo.text,
+        tag: headingInfo.tag,
+        id: headingInfo.id,
+        content: lines
+          .join("\n")
+          .replace(/\n{3,}/g, "\n\n")
+          .trim()
+      });
+    }
+  );
+
+  // ============================================================
+  // NORMAL ARTICLE CONTENT
+  // ============================================================
+
+  const contentSections =
+    sections.filter(
+      section =>
+        section.heading !==
+        "Recommended articles"
+    );
+
+  const content =
+    contentSections
+      .map(section =>
+        [
+          `# ${section.heading}`,
+          section.content
+        ]
+          .filter(Boolean)
+          .join("\n\n")
+      )
+      .join("\n\n")
+      .trim();
+
+  // ============================================================
+  // METADATA
+  // ============================================================
+
+  const articleId =
+    location.pathname.match(
+      /\/articles\/(\d+)/
+    )?.[1] ||
+    "unknown";
+
+  const title =
+    clean(
+      document.querySelector(
+        "h1"
+      )?.innerText
+    ) ||
+    document.title.replace(
+      /\s*\|\s*Test IO Academy\s*$/i,
+      ""
+    ) ||
+    "Article";
+
+  // ============================================================
+  // JSON OUTPUT
+  // ============================================================
+
+  const output = {
+    title,
+    articleId,
+    url: location.href,
+    sections,
+    content
+  };
+
+  // ============================================================
+  // AUTOMATIC JSON DOWNLOAD
+  // ============================================================
+
+  const filename =
+    `TestIO-Academy-${safeFilename(
+      title
+    )}-${articleId}.json`;
+
+  const blob = new Blob(
+    [JSON.stringify(output, null, 2)],
+    { type: "application/json;charset=utf-8" }
+  );
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+
+  link.href = url;
+  link.download = filename;
+
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+
+  // ============================================================
+  // SMALL CONSOLE SUMMARY
+  // ============================================================
+
+  console.log(
+    `%cTEST IO ACADEMY ${VERSION} — COMPLETE`,
+    "font-weight:bold;font-size:16px"
+  );
+
+  console.log({
+    title,
+    articleId,
+    sections: sections.length,
+    contentCharacters: content.length,
+    file: filename,
+    download: "triggered"
+  });
+})();

@@ -1,0 +1,1652 @@
+(async () => {
+  console.clear();
+
+  const VERSION =
+    "uTEST ACADEMY ARTICLE EXTRACTOR v1124";
+
+  const BASE = location.origin;
+
+  console.log(
+    `%c${VERSION}`,
+    "font-weight:bold;font-size:16px"
+  );
+
+  // ============================================================
+  // FETCH
+  // ============================================================
+
+  async function getJSON(url) {
+    const response = await fetch(url, {
+      credentials: "include"
+    });
+
+    if (!response.ok) {
+      throw new Error(
+        `${response.status} ${response.statusText}: ${url}`
+      );
+    }
+
+    return response.json();
+  }
+
+  // ============================================================
+  // TEXT UTILITIES
+  // ============================================================
+
+  function cleanText(value) {
+    return String(value ?? "")
+      .replace(/\u00a0/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  // ============================================================
+  // INLINE SERIALIZER
+  // ============================================================
+
+  function serializeInline(node) {
+    if (!node) {
+      return [];
+    }
+
+    const output = [];
+
+    function walk(element) {
+      if (!element) {
+        return;
+      }
+
+      if (
+        element.nodeType ===
+        Node.TEXT_NODE
+      ) {
+        if (element.nodeValue) {
+          output.push({
+            type: "text",
+            text: element.nodeValue
+          });
+        }
+
+        return;
+      }
+
+      if (
+        element.nodeType !==
+        Node.ELEMENT_NODE
+      ) {
+        return;
+      }
+
+      const tag =
+        element.tagName.toLowerCase();
+
+      // --------------------------------------------------------
+      // LINE BREAK
+      // --------------------------------------------------------
+
+      if (tag === "br") {
+        output.push({
+          type: "break"
+        });
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // LINK
+      // --------------------------------------------------------
+
+      if (tag === "a") {
+        const children = [];
+
+        for (
+          const child
+          of element.childNodes
+        ) {
+          const before =
+            output.length;
+
+          walk(child);
+
+          children.push(
+            ...output.splice(before)
+          );
+        }
+
+        output.push({
+          type: "link",
+          text:
+            cleanText(
+              element.textContent
+            ),
+          url:
+            element.href ||
+            element.getAttribute(
+              "href"
+            ) ||
+            "",
+          content: children
+        });
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // IMAGE
+      // --------------------------------------------------------
+
+      if (tag === "img") {
+        output.push({
+          type: "image",
+          alt:
+            element.getAttribute(
+              "alt"
+            ) || "",
+          url:
+            element.currentSrc ||
+            element.src ||
+            element.getAttribute(
+              "src"
+            ) ||
+            ""
+        });
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // FORMATTING
+      // --------------------------------------------------------
+
+      const formats = {
+        strong: "strong",
+        b: "b",
+        em: "em",
+        i: "i",
+        u: "u",
+        s: "s",
+        del: "del",
+        mark: "mark"
+      };
+
+      if (formats[tag]) {
+        const children = [];
+
+        for (
+          const child
+          of element.childNodes
+        ) {
+          const before =
+            output.length;
+
+          walk(child);
+
+          children.push(
+            ...output.splice(before)
+          );
+        }
+
+        output.push({
+          type: "format",
+          format:
+            formats[tag],
+          content: children
+        });
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // GENERIC INLINE ELEMENT
+      // --------------------------------------------------------
+
+      for (
+        const child
+        of element.childNodes
+      ) {
+        walk(child);
+      }
+    }
+
+    walk(node);
+
+    return output;
+  }
+
+  // ============================================================
+  // TABLE CELL
+  // ============================================================
+
+  function serializeCell(cell) {
+    return {
+      tag:
+        cell.tagName.toLowerCase(),
+
+      colspan:
+        Number(
+          cell.getAttribute(
+            "colspan"
+          ) || 1
+        ),
+
+      rowspan:
+        Number(
+          cell.getAttribute(
+            "rowspan"
+          ) || 1
+        ),
+
+      content:
+        serializeInline(cell)
+    };
+  }
+
+  // ============================================================
+  // TABLE
+  // ============================================================
+
+  function serializeTable(table) {
+    const rows = [];
+
+    const tableRows =
+      table.querySelectorAll("tr");
+
+    tableRows.forEach(row => {
+      const cells =
+        [...row.children]
+          .filter(element =>
+            element.tagName === "TH" ||
+            element.tagName === "TD"
+          );
+
+      if (!cells.length) {
+        return;
+      }
+
+      // Single TH spanning the table:
+      // preserve as a semantic section/category.
+      if (
+        cells.length === 1 &&
+        cells[0].tagName === "TH" &&
+        Number(
+          cells[0].getAttribute(
+            "colspan"
+          ) || 1
+        ) > 1
+      ) {
+        rows.push({
+          type: "section",
+
+          colspan:
+            Number(
+              cells[0].getAttribute(
+                "colspan"
+              ) || 1
+            ),
+
+          content:
+            serializeInline(
+              cells[0]
+            )
+        });
+
+        return;
+      }
+
+      rows.push({
+        type: "row",
+
+        cells:
+          cells.map(
+            serializeCell
+          )
+      });
+    });
+
+    return {
+      type: "table",
+      rows
+    };
+  }
+
+  // ============================================================
+  // LIST
+  // ============================================================
+
+  function serializeList(list) {
+    const ordered =
+      list.tagName.toLowerCase() ===
+      "ol";
+
+    const items = [];
+
+    for (
+      const li
+      of [...list.children]
+    ) {
+      if (
+        li.tagName !== "LI"
+      ) {
+        continue;
+      }
+
+      const content = [];
+      const children = [];
+
+      for (
+        const child
+        of li.childNodes
+      ) {
+        if (
+          child.nodeType ===
+          Node.ELEMENT_NODE
+        ) {
+          const tag =
+            child.tagName.toLowerCase();
+
+          if (
+            tag === "ul" ||
+            tag === "ol"
+          ) {
+            children.push(
+              serializeList(child)
+            );
+
+            continue;
+          }
+        }
+
+        const before =
+          content.length;
+
+        const inline =
+          serializeInline(child);
+
+        content.push(
+          ...inline
+        );
+      }
+
+      items.push({
+        content,
+
+        ...(children.length
+          ? {
+              children
+            }
+          : {})
+      });
+    }
+
+    return {
+      type: "list",
+      ordered,
+      items
+    };
+  }
+
+  // ============================================================
+  // MARKDOWN-ISH HEADING NORMALIZATION
+  //
+  // API content can contain:
+  //
+  // ### Heading
+  //
+  // while richer content is HTML.
+  // Convert only Markdown heading lines.
+  // ============================================================
+
+  function normalizeMarkdownHeadings(
+    source
+  ) {
+    if (!source) {
+      return "";
+    }
+
+    return String(source).replace(
+      /^\s*(#{1,6})\s+(.+?)\s*$/gm,
+      (match, hashes, text) => {
+        const level =
+          hashes.length;
+
+        return `<h${level}>${text}</h${level}>`;
+      }
+    );
+  }
+
+  // ============================================================
+  // CONTENT SERIALIZER
+  // ============================================================
+
+  function serializeContent(source) {
+    const normalized =
+      normalizeMarkdownHeadings(
+        source
+      );
+
+    const parser =
+      new DOMParser();
+
+    const doc =
+      parser.parseFromString(
+        normalized || "",
+        "text/html"
+      );
+
+    // Never extract editor/page implementation noise.
+    doc
+      .querySelectorAll(
+        "style,script,noscript,template,link,meta"
+      )
+      .forEach(element =>
+        element.remove()
+      );
+
+    const content = [];
+
+    function addNode(node) {
+      if (!node) {
+        return;
+      }
+
+      // --------------------------------------------------------
+      // RAW TEXT
+      // --------------------------------------------------------
+
+      if (
+        node.nodeType ===
+        Node.TEXT_NODE
+      ) {
+        const text =
+          cleanText(
+            node.nodeValue
+          );
+
+        if (text) {
+          content.push({
+            type: "text",
+            content: [
+              {
+                type: "text",
+                text
+              }
+            ]
+          });
+        }
+
+        return;
+      }
+
+      if (
+        node.nodeType !==
+        Node.ELEMENT_NODE
+      ) {
+        return;
+      }
+
+      const tag =
+        node.tagName.toLowerCase();
+
+      // --------------------------------------------------------
+      // IGNORE
+      // --------------------------------------------------------
+
+      if (
+        [
+          "style",
+          "script",
+          "noscript",
+          "template",
+          "link",
+          "meta"
+        ].includes(tag)
+      ) {
+        return;
+      }
+
+      // --------------------------------------------------------
+      // WISTIA
+      // --------------------------------------------------------
+
+      if (
+        tag ===
+        "wistia-player"
+      ) {
+        const mediaId =
+          node.getAttribute(
+            "media-id"
+          );
+
+        if (mediaId) {
+          content.push({
+            type: "video",
+            provider: "wistia",
+            mediaId
+          });
+        }
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // HEADING
+      // --------------------------------------------------------
+
+      if (
+        /^h[1-6]$/.test(tag)
+      ) {
+        content.push({
+          type: "heading",
+
+          level:
+            Number(
+              tag.substring(1)
+            ),
+
+          content:
+            serializeInline(node)
+        });
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // PARAGRAPH
+      // --------------------------------------------------------
+
+      if (tag === "p") {
+        const inline =
+          serializeInline(node);
+
+        if (inline.length) {
+          content.push({
+            type: "paragraph",
+            content: inline
+          });
+        }
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // TABLE
+      // --------------------------------------------------------
+
+      if (tag === "table") {
+        content.push(
+          serializeTable(node)
+        );
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // LIST
+      // --------------------------------------------------------
+
+      if (
+        tag === "ul" ||
+        tag === "ol"
+      ) {
+        content.push(
+          serializeList(node)
+        );
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // IMAGE
+      // --------------------------------------------------------
+
+      if (tag === "img") {
+        content.push({
+          type: "image",
+
+          alt:
+            node.getAttribute(
+              "alt"
+            ) || "",
+
+          url:
+            node.currentSrc ||
+            node.src ||
+            node.getAttribute(
+              "src"
+            ) ||
+            ""
+        });
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // BLOCKQUOTE
+      // --------------------------------------------------------
+
+      if (
+        tag === "blockquote"
+      ) {
+        content.push({
+          type: "blockquote",
+
+          content:
+            serializeInline(node)
+        });
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // CODE
+      // --------------------------------------------------------
+
+      if (tag === "pre") {
+        content.push({
+          type: "code",
+
+          content:
+            node.textContent || ""
+        });
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // SEPARATOR
+      // --------------------------------------------------------
+
+      if (tag === "hr") {
+        content.push({
+          type: "separator"
+        });
+
+        return;
+      }
+
+      // --------------------------------------------------------
+      // GENERIC BLOCK CONTAINER
+      // --------------------------------------------------------
+
+      for (
+        const child
+        of node.childNodes
+      ) {
+        addNode(child);
+      }
+    }
+
+    for (
+      const child
+      of doc.body.childNodes
+    ) {
+      addNode(child);
+    }
+
+    return content.filter(
+      node => {
+        if (
+          node.type !==
+          "text"
+        ) {
+          return true;
+        }
+
+        return node.content?.some(
+          item =>
+            item.type === "text" &&
+            item.text.trim()
+        );
+      }
+    );
+  }
+
+  // ============================================================
+  // SAFE FILE NAME
+  //
+  // IMPORTANT:
+  // Course ID is included to prevent collisions between
+  // courses with identical titles.
+  // ============================================================
+
+  function safeFilename(
+    document
+  ) {
+    const title =
+      String(
+        document.title ||
+        document.slug ||
+        "Untitled Course"
+      )
+        .replace(
+          /[<>:"/\\|?*\x00-\x1F]/g,
+          "_"
+        )
+        .replace(
+          /\s+/g,
+          " "
+        )
+        .trim();
+
+    return `${document.courseId} - ${title}.json`;
+  }
+
+  // ============================================================
+  // LEARNING TRACK DISCOVERY
+  // ============================================================
+
+  console.log(
+    "\nFetching learning tracks..."
+  );
+
+  const learningResponse =
+    await getJSON(
+      `${BASE}/api/v1/learning_tracks?page=1&per_page=100`
+    );
+
+  const learningTracks =
+    Array.isArray(
+      learningResponse
+    )
+      ? learningResponse
+      : learningResponse.learning_tracks ||
+        learningResponse.tracks ||
+        learningResponse.data ||
+        learningResponse.results ||
+        [];
+
+  console.log(
+    "Learning tracks:",
+    learningTracks.length
+  );
+
+  // ============================================================
+  // COURSE TRACK DISCOVERY
+  // ============================================================
+
+  const courseTracks = [];
+
+  for (
+    const learningTrack
+    of learningTracks
+  ) {
+    const tracks =
+      Array.isArray(
+        learningTrack.course_tracks
+      )
+        ? learningTrack.course_tracks
+        : [];
+
+    for (
+      const courseTrack
+      of tracks
+    ) {
+      courseTracks.push({
+        learningTrackId:
+          learningTrack.id,
+
+        learningTrackName:
+          learningTrack.name,
+
+        courseTrackId:
+          courseTrack.id,
+
+        courseTrackName:
+          courseTrack.name,
+
+        sortOrder:
+          courseTrack.sort_order_in_learning_track
+      });
+    }
+  }
+
+  console.log(
+    "Course tracks:",
+    courseTracks.length
+  );
+
+  // ============================================================
+  // COURSE DISCOVERY
+  // ============================================================
+
+  const courseMap =
+    new Map();
+
+  let courseTrackFailures = 0;
+
+  for (
+    const track
+    of courseTracks
+  ) {
+    try {
+      console.log(
+        `Fetching course track ${track.courseTrackId}: ${track.courseTrackName}`
+      );
+
+      const data =
+        await getJSON(
+          `${BASE}/api/v1/course_tracks/${track.courseTrackId}` +
+          `?include_course=true&include_quiz=true`
+        );
+
+      const exposedCourses =
+        Array.isArray(
+          data.courses
+        )
+          ? data.courses
+          : [];
+
+      console.log(
+        `  Courses exposed: ${exposedCourses.length}`
+      );
+
+      for (
+        const course
+        of exposedCourses
+      ) {
+        if (
+          !course ||
+          typeof course.id ===
+            "undefined"
+        ) {
+          continue;
+        }
+
+        const courseId =
+          Number(course.id);
+
+        if (
+          !Number.isFinite(
+            courseId
+          )
+        ) {
+          continue;
+        }
+
+        let existing =
+          courseMap.get(
+            courseId
+          );
+
+        if (!existing) {
+          existing = {
+            ...course,
+
+            _learningTracks:
+              [],
+
+            _courseTracks:
+              []
+          };
+        }
+
+        // Preserve all learning-track associations.
+        if (
+          !existing._learningTracks
+            .some(
+              item =>
+                String(
+                  item.id
+                ) ===
+                String(
+                  track.learningTrackId
+                )
+            )
+        ) {
+          existing._learningTracks.push({
+            id:
+              track.learningTrackId,
+
+            name:
+              track.learningTrackName
+          });
+        }
+
+        // Preserve all course-track associations.
+        if (
+          !existing._courseTracks
+            .some(
+              item =>
+                String(
+                  item.id
+                ) ===
+                String(
+                  track.courseTrackId
+                )
+            )
+        ) {
+          existing._courseTracks.push({
+            id:
+              track.courseTrackId,
+
+            name:
+              track.courseTrackName,
+
+            sortOrder:
+              track.sortOrder
+          });
+        }
+
+        courseMap.set(
+          courseId,
+          existing
+        );
+      }
+
+    } catch (error) {
+      courseTrackFailures++;
+
+      console.warn(
+        `Course track ${track.courseTrackId} failed:`,
+        error.message
+      );
+    }
+  }
+
+  const discoveredCourses =
+    [...courseMap.values()];
+
+  console.log(
+    "\nUnique courses discovered:",
+    discoveredCourses.length
+  );
+
+  console.log(
+    "Course-track failures:",
+    courseTrackFailures
+  );
+
+  // ============================================================
+  // FULL COURSE EXTRACTION
+  // ============================================================
+
+  const documents = [];
+
+  let courseFailures = 0;
+
+  for (
+    let index = 0;
+    index < discoveredCourses.length;
+    index++
+  ) {
+    const discovered =
+      discoveredCourses[index];
+
+    const courseId =
+      Number(
+        discovered.id
+      );
+
+    try {
+      console.log(
+        `[${index + 1}/${discoveredCourses.length}] Extracting course ${courseId}`
+      );
+
+      const course =
+        await getJSON(
+          `${BASE}/api/v1/courses/${courseId}`
+        );
+
+      const sections =
+        Array.isArray(
+          course.sections
+        )
+          ? course.sections
+          : [];
+
+      const serializedSections =
+        sections.map(
+          section => ({
+            id:
+              section.id,
+
+            title:
+              section.title,
+
+            slug:
+              section.slug,
+
+            index:
+              section.index,
+
+            content:
+              serializeContent(
+                section.content ||
+                ""
+              )
+          })
+        );
+
+      const learningTracksForCourse =
+        discovered._learningTracks ||
+        [];
+
+      const courseTracksForCourse =
+        discovered._courseTracks ||
+        [];
+
+      const primaryLearningTrack =
+        learningTracksForCourse[0];
+
+      const document = {
+        source:
+          "uTest Academy",
+
+        extractorVersion:
+          VERSION,
+
+        courseId:
+          course.id,
+
+        title:
+          course.title ||
+          discovered.title ||
+          discovered.name ||
+          "",
+
+        slug:
+          course.slug ||
+          discovered.slug ||
+          "",
+
+        url:
+          `${BASE}/academy/tracks/` +
+          `${
+            primaryLearningTrack?.id ||
+            ""
+          }/courses/` +
+          `${
+            course.slug ||
+            discovered.slug ||
+            ""
+          }`,
+
+        courseTrackId:
+          course.course_track_id ||
+          courseTracksForCourse?.[0]?.id ||
+          null,
+
+        learningTracks:
+          learningTracksForCourse,
+
+        courseTracks:
+          courseTracksForCourse,
+
+        publishedAt:
+          course.published_at ||
+          null,
+
+        difficulty:
+          course.difficulty ||
+          null,
+
+        estimatedDurationMinutes:
+          course.estimated_duration_minutes ||
+          course.estimated_time_minutes ||
+          null,
+
+        extractedAt:
+          new Date().toISOString(),
+
+        sections:
+          serializedSections
+      };
+
+      documents.push(
+        document
+      );
+
+    } catch (error) {
+      courseFailures++;
+
+      console.warn(
+        `Course ${courseId} failed:`,
+        error.message
+      );
+    }
+  }
+
+  // ============================================================
+  // FINAL COURSE DEDUPLICATION
+  // ============================================================
+
+  const documentMap =
+    new Map();
+
+  for (
+    const document
+    of documents
+  ) {
+    documentMap.set(
+      Number(
+        document.courseId
+      ),
+      document
+    );
+  }
+
+  const finalDocuments =
+    [...documentMap.values()]
+      .sort(
+        (a, b) =>
+          String(
+            a.title
+          ).localeCompare(
+            String(
+              b.title
+            )
+          )
+      );
+
+  // ============================================================
+  // MANIFEST
+  // ============================================================
+
+  const manifest = {
+    source:
+      "uTest Academy",
+
+    extractorVersion:
+      VERSION,
+
+    extractedAt:
+      new Date().toISOString(),
+
+    statistics: {
+      learningTracks:
+        learningTracks.length,
+
+      courseTracks:
+        courseTracks.length,
+
+      uniqueCoursesDiscovered:
+        discoveredCourses.length,
+
+      coursesExtracted:
+        finalDocuments.length,
+
+      courseTrackFailures,
+
+      courseFailures
+    },
+
+    courses:
+      finalDocuments.map(
+        document => ({
+          courseId:
+            document.courseId,
+
+          title:
+            document.title,
+
+          slug:
+            document.slug,
+
+          url:
+            document.url,
+
+          sectionCount:
+            document.sections.length,
+
+          learningTracks:
+            document.learningTracks,
+
+          courseTracks:
+            document.courseTracks
+        })
+      )
+  };
+
+  // ============================================================
+  // ZIP IMPLEMENTATION
+  // ============================================================
+
+  function crc32(bytes) {
+    let crc =
+      0xffffffff;
+
+    for (
+      let i = 0;
+      i < bytes.length;
+      i++
+    ) {
+      crc ^= bytes[i];
+
+      for (
+        let bit = 0;
+        bit < 8;
+        bit++
+      ) {
+        crc =
+          (crc >>> 1) ^
+          (
+            -(crc & 1) &
+            0xedb88320
+          );
+      }
+    }
+
+    return (
+      crc ^
+      0xffffffff
+    ) >>> 0;
+  }
+
+  function u16(number) {
+    return new Uint8Array([
+      number & 255,
+      (number >>> 8) & 255
+    ]);
+  }
+
+  function u32(number) {
+    return new Uint8Array([
+      number & 255,
+      (number >>> 8) & 255,
+      (number >>> 16) & 255,
+      (number >>> 24) & 255
+    ]);
+  }
+
+  function concatArrays(
+    ...arrays
+  ) {
+    const totalLength =
+      arrays.reduce(
+        (sum, array) =>
+          sum + array.length,
+        0
+      );
+
+    const result =
+      new Uint8Array(
+        totalLength
+      );
+
+    let offset = 0;
+
+    for (
+      const array
+      of arrays
+    ) {
+      result.set(
+        array,
+        offset
+      );
+
+      offset +=
+        array.length;
+    }
+
+    return result;
+  }
+
+  function createZip(files) {
+    const encoder =
+      new TextEncoder();
+
+    const localParts = [];
+    const centralParts = [];
+
+    let offset = 0;
+
+    for (
+      const file
+      of files
+    ) {
+      const nameBytes =
+        encoder.encode(
+          file.name
+        );
+
+      const dataBytes =
+        encoder.encode(
+          file.content
+        );
+
+      const checksum =
+        crc32(
+          dataBytes
+        );
+
+      // ZIP method 0 = stored/uncompressed.
+      const localHeader =
+        concatArrays(
+          new Uint8Array([
+            0x50, 0x4b,
+            0x03, 0x04
+          ]),
+
+          u16(20), // version needed
+          u16(0),  // flags
+          u16(0),  // compression
+          u16(0),  // mod time
+          u16(0),  // mod date
+
+          u32(checksum),
+
+          u32(
+            dataBytes.length
+          ),
+
+          u32(
+            dataBytes.length
+          ),
+
+          u16(
+            nameBytes.length
+          ),
+
+          u16(0),
+
+          nameBytes
+        );
+
+      localParts.push(
+        localHeader,
+        dataBytes
+      );
+
+      const centralHeader =
+        concatArrays(
+          new Uint8Array([
+            0x50, 0x4b,
+            0x01, 0x02
+          ]),
+
+          u16(20), // made by
+          u16(20), // needed
+
+          u16(0),
+          u16(0),
+          u16(0),
+          u16(0),
+
+          u32(checksum),
+
+          u32(
+            dataBytes.length
+          ),
+
+          u32(
+            dataBytes.length
+          ),
+
+          u16(
+            nameBytes.length
+          ),
+
+          u16(0),
+          u16(0),
+          u16(0),
+          u16(0),
+
+          u32(0),
+
+          u32(offset),
+
+          nameBytes
+        );
+
+      centralParts.push(
+        centralHeader
+      );
+
+      offset +=
+        localHeader.length +
+        dataBytes.length;
+    }
+
+    const local =
+      concatArrays(
+        ...localParts
+      );
+
+    const central =
+      concatArrays(
+        ...centralParts
+      );
+
+    const endRecord =
+      concatArrays(
+        new Uint8Array([
+          0x50, 0x4b,
+          0x05, 0x06
+        ]),
+
+        u16(0),
+        u16(0),
+
+        u16(files.length),
+        u16(files.length),
+
+        u32(
+          central.length
+        ),
+
+        u32(
+          local.length
+        ),
+
+        u16(0)
+      );
+
+    return new Blob(
+      [
+        local,
+        central,
+        endRecord
+      ],
+      {
+        type:
+          "application/zip"
+      }
+    );
+  }
+
+  // ============================================================
+  // BUILD JSON-ONLY ZIP
+  // ============================================================
+
+  console.log(
+    "\nBuilding JSON-only ZIP..."
+  );
+
+  const files = [];
+
+  for (
+    const document
+    of finalDocuments
+  ) {
+    files.push({
+      name:
+        safeFilename(
+          document
+        ),
+
+      content:
+        JSON.stringify(
+          document,
+          null,
+          2
+        )
+    });
+  }
+
+  // One manifest, no TXT files.
+  files.push({
+    name:
+      "manifest.json",
+
+    content:
+      JSON.stringify(
+        manifest,
+        null,
+        2
+      )
+  });
+
+  // ------------------------------------------------------------
+  // VERIFY FILENAMES BEFORE DOWNLOAD
+  // ------------------------------------------------------------
+
+  const filenameSet =
+    new Set();
+
+  const duplicateFilenames =
+    [];
+
+  for (
+    const file
+    of files
+  ) {
+    if (
+      filenameSet.has(
+        file.name
+      )
+    ) {
+      duplicateFilenames.push(
+        file.name
+      );
+    }
+
+    filenameSet.add(
+      file.name
+    );
+  }
+
+  if (
+    duplicateFilenames.length
+  ) {
+    console.error(
+      "DUPLICATE FILENAMES DETECTED:",
+      duplicateFilenames
+    );
+
+    throw new Error(
+      `ZIP aborted: ${duplicateFilenames.length} duplicate filename(s) detected.`
+    );
+  }
+
+  console.log(
+    "Filename verification: PASS"
+  );
+
+  console.log(
+    `Unique ZIP filenames: ${filenameSet.size}`
+  );
+
+  // ------------------------------------------------------------
+  // CREATE ZIP
+  // ------------------------------------------------------------
+
+  const zip =
+    createZip(files);
+
+  const downloadURL =
+    URL.createObjectURL(
+      zip
+    );
+
+  const anchor =
+    document.createElement(
+      "a"
+    );
+
+  anchor.href =
+    downloadURL;
+
+  anchor.download =
+    "uTest-Academy-v1124-JSON.zip";
+
+  document.body.appendChild(
+    anchor
+  );
+
+  anchor.click();
+
+  anchor.remove();
+
+  setTimeout(
+    () =>
+      URL.revokeObjectURL(
+        downloadURL
+      ),
+    10000
+  );
+
+  // ============================================================
+  // FINAL REPORT
+  // ============================================================
+
+  console.log(
+    "\n=========================================="
+  );
+
+  console.log(
+    "uTEST ACADEMY EXTRACTOR v1124 COMPLETE"
+  );
+
+  console.log(
+    "=========================================="
+  );
+
+  console.log(
+    "Learning tracks:",
+    learningTracks.length
+  );
+
+  console.log(
+    "Course tracks:",
+    courseTracks.length
+  );
+
+  console.log(
+    "Courses discovered:",
+    discoveredCourses.length
+  );
+
+  console.log(
+    "Courses extracted:",
+    finalDocuments.length
+  );
+
+  console.log(
+    "Course-track failures:",
+    courseTrackFailures
+  );
+
+  console.log(
+    "Course failures:",
+    courseFailures
+  );
+
+  console.log(
+    "JSON files:",
+    finalDocuments.length
+  );
+
+  console.log(
+    "Manifest:",
+    "1"
+  );
+
+  console.log(
+    "Total ZIP entries:",
+    files.length
+  );
+
+  console.log(
+    "Duplicate filenames:",
+    duplicateFilenames.length
+  );
+
+  console.log(
+    "Production artifact:",
+    "uTest-Academy-v1124-JSON.zip"
+  );
+
+  console.log(
+    "=========================================="
+  );
+})();
